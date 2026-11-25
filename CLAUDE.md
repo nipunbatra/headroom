@@ -40,6 +40,18 @@ It runs without Claude: open `dist/Headroom.app`, it scans, you click Clean.
 - Paths in `scan.json` use `~` so a shared snapshot carries no account name.
 - Test deletion only on throwaway fixtures (see how `_fixture/` was used), never on real data.
 
+## Deeper views
+
+- `rule_items()` lists the independent pieces inside a rule (`ITEM_LEVELS` says where they
+  live). Items carry `seen` (newest read or write) and `changed` (newest write). macOS moves
+  read times forward only occasionally and backups count as reads, so the UI calls it a hint.
+- Hugging Face hubs (`HF_HUBS`) link repos into a shared blob store. `hfrepo:` ids delete a repo
+  plus the blobs only it uses; `hforphans:` deletes blobs nothing links to. Both are worked out
+  on the server at delete time, never taken from the page.
+- `/api/list` returns one folder's live contents (home folder only, read-only, 6 second budget);
+  `/api/reveal` shows an item in Finder. "Look inside" in the UI is built on these.
+- Rules in `PERMANENT` are download caches: removed outright, like other caches.
+
 ## Known gaps
 
 - APFS clones are counted once per copy, so sizes overstate what deleting returns. Measured on

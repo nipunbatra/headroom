@@ -5,6 +5,11 @@ A small Mac app that shows what is filling your disk and clears it when you clic
 - **Overview**: free space, a level meter of what fills the disk, and one "Clean safe items" button.
 - **Clean up**: known places where space piles up (caches, package managers, simulators, model
   caches, session logs), each marked *safe to clear*, *review first* or *leave alone*.
+  Open a rule to see what is inside it: each model in the Hugging Face cache, each Xcode
+  project in DerivedData, each superseded VS Code extension, with its size, age and a hint
+  about whether it still looks in use.
+- **Look inside**: open any folder in place (Downloads, a project, a cache), see what is in it
+  live, and clean or reveal single items.
 - **Disk map**: a drill-down treemap of every folder over 200 MB.
 - **Large files, Projects, Downloads, Applications**: big single files and duplicates,
   `node_modules` / virtualenvs / build folders in idle projects, old downloads, app sizes.

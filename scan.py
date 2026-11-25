@@ -18,11 +18,13 @@ and never fetched. APFS clones are counted once per copy, so totals can run
 slightly above what the disk reports.
 """
 import argparse
+import glob
 import hashlib
 import hmac
 import json
 import os
 import platform
+import plistlib
 import re
 import secrets
 import shutil
@@ -95,8 +97,11 @@ RULES = [
      "Pretrained weights fetched by torch.hub and torchvision.", None),
     ("ollama", "ml", "review", "Ollama models", "~/.ollama/models",
      "Local LLM weights. Remove single models with ollama rm <name>.", None),
-    ("lmstudio", "ml", "review", "LM Studio models", "~/.lmstudio",
+    ("lmstudio", "ml", "review", "LM Studio models", "~/.lmstudio/models",
      "Local LLM weights downloaded through LM Studio.", None),
+    ("lmstudio-rt", "ml", "review", "LM Studio runtimes", "~/.lmstudio/extensions/backends",
+     "Inference engines LM Studio downloaded. It keeps old versions; remove the ones you no longer select under Runtimes.",
+     "@manual"),
     ("lmstudio2", "ml", "review", "LM Studio models", "~/.cache/lm-studio",
      "Local LLM weights downloaded through LM Studio.", None),
     ("whisper", "ml", "review", "Whisper models", "~/.cache/whisper",
@@ -433,6 +438,263 @@ def project_mtime(parent, skip):
     return int(latest)
 
 
+# ------------------------------------------------------------ what is inside a rule
+PERMANENT = {"hf", "whisper", "torch"}      # download caches: removed outright, like any cache
+HF_HUBS = ["~/.cache/huggingface/hub", "~/.cache/whisper"]
+HF_REPO = re.compile(r"(models|datasets|spaces)--[A-Za-z0-9._\-]+")
+HF_KIND = {"models": "Model", "datasets": "Dataset", "spaces": "Space"}
+# rule id -> where its independent pieces live ("*" is one folder level)
+ITEM_LEVELS = {
+    "hf": ["datasets/*", "xet", "modules", "trackio"],
+    "whisper": ["*"],
+    "lmstudio": ["*/*"],
+    "lmstudio-rt": ["vendor/*", "*"],
+    "lmstudio2": ["models/*/*"],
+    "torch": ["hub/checkpoints/*", "hub/*"],
+    "nltk": ["*/*"],
+    "derived": ["*"], "devsupport": ["*"], "archives": ["*/*"], "simdevices": ["*"], "ios-backups": ["*"],
+    "codex-tasks": ["*"], "codex-sessions": ["*/*"], "codex-worktrees": ["*"], "claude-sessions": ["*"],
+    "conda-envs": ["*"], "pyenv": ["*"], "nvm": ["node/*"], "rustup": ["*"], "vscode-ext": ["*"],
+    "playwright": ["*"], "android-avd": ["*"],
+}
+ITEM_MIN = 10 * MB
+ITEM_KEEP = 80
+
+
+def last_seen(path, cap=3000):
+    """(newest read-or-write, newest write) among a folder's files, looking at up to `cap` of them.
+    macOS moves read times forward only now and then, so the first value is a lower bound on
+    last use: the thing was in use at least that recently."""
+    seen = changed = 0
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0, 0
+    if not stat.S_ISDIR(st.st_mode):
+        return int(max(st.st_atime, st.st_mtime)), int(st.st_mtime)
+    stack, n = [path], 0
+    while stack and n < cap:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append(e.path)
+                    elif stat.S_ISREG(st.st_mode):
+                        n += 1
+                        seen = max(seen, st.st_atime, st.st_mtime)
+                        changed = max(changed, st.st_mtime)
+        except OSError:
+            continue
+    return int(seen), int(changed)
+
+
+def folder_bytes(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            try:
+                st = os.lstat(os.path.join(root, f))
+                if stat.S_ISREG(st.st_mode):
+                    total += st.st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def hf_links(hub):
+    """Hugging Face hub layout: each repo folder links into a shared, content-addressed blob
+    store at <hub>/blobs. Returns ({repo folder: set of shared blobs it links to}, store path)."""
+    shared = os.path.join(hub, "blobs")
+    out = {}
+    try:
+        names = os.listdir(hub)
+    except OSError:
+        return out, shared
+    for n in names:
+        repo = os.path.join(hub, n)
+        if not HF_REPO.fullmatch(n) or os.path.islink(repo) or not os.path.isdir(repo):
+            continue
+        targets = set()
+        for sub in ("blobs", "snapshots"):
+            for root, dirs, files in os.walk(os.path.join(repo, sub)):
+                for f in files:
+                    p = os.path.join(root, f)
+                    if os.path.islink(p):
+                        t = os.path.realpath(p)
+                        if t.startswith(shared + os.sep):
+                            targets.add(t)
+        out[repo] = targets
+    return out, shared
+
+
+def hf_orphans(hub, links=None, shared=None):
+    """Files in the shared blob store that no repo links to any more."""
+    if links is None:
+        links, shared = hf_links(hub)
+    used = set().union(*links.values()) if links else set()
+    out = []
+    for root, dirs, files in os.walk(shared):
+        for f in files:
+            p = os.path.join(root, f)
+            if p not in used and not os.path.islink(p):
+                out.append(p)
+    return out
+
+
+def hf_items(hub, sizes):
+    links, shared = hf_links(hub)
+    owners = {}
+    for ts in links.values():
+        for t in ts:
+            owners[t] = owners.get(t, 0) + 1
+    items = []
+    for repo, ts in links.items():
+        own = sizes.get(repo, 0) if sizes is not None else folder_bytes(repo)
+        seen, changed = last_seen(repo)
+        mine = common = 0
+        for t in ts:
+            try:
+                st = os.stat(t)
+            except OSError:
+                continue
+            b = st.st_blocks * 512
+            if owners[t] == 1:
+                mine += b
+            else:
+                common += b
+            seen = max(seen, int(st.st_atime), int(st.st_mtime))
+            changed = max(changed, int(st.st_mtime))
+        kind, _, rest = os.path.basename(repo).partition("--")
+        item = {"id": "hfrepo:" + disp(repo), "name": rest.replace("--", "/"), "kind": HF_KIND[kind],
+                "path": disp(repo), "bytes": own + mine, "seen": seen, "changed": changed}
+        if common >= 50 * MB:
+            item["note"] = f"Another {common / GB:.1f} GB is shared with other entries and stays until they go too."
+        items.append(item)
+    orphans = hf_orphans(hub, links, shared)
+    b = 0
+    for p in orphans:
+        try:
+            b += os.lstat(p).st_blocks * 512
+        except OSError:
+            pass
+    if b >= ITEM_MIN:
+        items.append({"id": "hforphans:" + disp(hub), "name": "Leftover blobs", "kind": "Leftover",
+                      "path": disp(shared), "bytes": b, "seen": 0, "changed": 0, "flag": "leftover",
+                      "note": f"{len(orphans):,} stored files that no model or dataset links to any more."})
+    return items
+
+
+def decorate(key, item, p, rule_path):
+    """Rule-specific names and hints for one item."""
+    rel = os.path.relpath(p, rule_path)
+    name = rel
+    for prefix in ("models/", "hub/checkpoints/", "hub/", "node/"):
+        if rel.startswith(prefix):
+            name = rel[len(prefix):]
+            break
+    if key == "hf":
+        if rel.startswith("datasets/"):
+            name, item["kind"] = rel[9:].replace("___", "/"), "Prepared dataset"
+        elif rel == "xet":
+            name, item["kind"], item["flag"] = "Xet transfer cache", "Cache", "leftover"
+            item["note"] = "Download chunks kept to speed up later transfers."
+    elif key == "claude-sessions":
+        enc = HOME.replace("/", "-")
+        name = (rel[len(enc):].lstrip("-") or "home folder") if rel.startswith(enc) else rel
+    elif key == "simdevices":
+        try:
+            with open(os.path.join(p, "device.plist"), "rb") as f:
+                d = plistlib.load(f)
+            runtime = d.get("runtime", "").rsplit(".", 1)[-1].replace("-", " ", 1).replace("-", ".")
+            name = f"{d.get('name', rel)} ({runtime})" if runtime else d.get("name", rel)
+        except Exception:  # noqa: BLE001 - keep the folder name
+            pass
+    item["name"] = name
+
+
+def flag_old_versions(items, rule_path):
+    """VS Code keeps superseded extension versions around for a while; point them out."""
+    obsolete = {}
+    try:
+        with open(os.path.join(rule_path, ".obsolete")) as f:
+            obsolete = json.load(f)
+    except (OSError, ValueError):
+        pass
+    newest = {}
+    parsed = {}
+    for it in items:
+        m = re.match(r"^(.+?)-(\d+(?:\.\d+)+)(?:-.+)?$", it["name"])
+        if not m:
+            continue
+        ver = tuple(int(x) for x in m.group(2).split("."))
+        parsed[it["id"]] = (m.group(1), ver, m.group(2))
+        if ver > newest.get(m.group(1), ((), ""))[0]:
+            newest[m.group(1)] = (ver, m.group(2))
+    for it in items:
+        ext = parsed.get(it["id"])
+        if it["name"] in obsolete or (ext and ext[1] < newest[ext[0]][0]):
+            it["flag"] = "leftover"
+            it["note"] = (f"Superseded: version {newest[ext[0]][1]} is installed." if ext and ext[1] < newest[ext[0]][0]
+                          else "VS Code has marked this version for removal.")
+
+
+def rule_items(rid, path, sizes):
+    """The independent pieces inside a rule's folder, largest first, each with its size and age.
+    `sizes` is the scan's folder-size table; pass None to measure folders directly."""
+    key = re.sub(r"-\d+$", "", rid)
+    hubs = {expand(h) for h in HF_HUBS}
+    items = []
+    rest_n = rest_b = 0
+    for hub in (path, os.path.join(path, "hub")):
+        if hub in hubs and os.path.isdir(hub):
+            for it in hf_items(hub, sizes):
+                if it["bytes"] >= ITEM_MIN:
+                    items.append(it)
+                else:
+                    rest_n += 1
+                    rest_b += it["bytes"]
+    found = []
+    for pat in ITEM_LEVELS.get(key, []):
+        found += glob.glob(os.path.join(glob.escape(path), pat))
+    found = sorted(set(found))
+    for p in found:
+        name = os.path.basename(p)
+        if os.path.islink(p) or name.startswith(".") or name == "CACHEDIR.TAG":
+            continue
+        if os.path.dirname(p) in hubs and (HF_REPO.fullmatch(name) or name == "blobs"):
+            continue                                    # handled by hf_items
+        if any(q.startswith(p + os.sep) for q in found):
+            continue                                    # a parent of other items, not an item itself
+        if os.path.isdir(p):
+            b = sizes.get(p, 0) if sizes is not None else folder_bytes(p)
+        else:
+            try:
+                b = os.lstat(p).st_blocks * 512
+            except OSError:
+                continue
+        if b < ITEM_MIN:
+            rest_n += 1
+            rest_b += b
+            continue
+        seen, changed = last_seen(p)
+        item = {"id": "file:" + disp(p), "path": disp(p), "bytes": b, "seen": seen, "changed": changed}
+        if os.path.isdir(p):
+            item["dir"] = True
+        decorate(key, item, p, path)
+        items.append(item)
+    if key == "vscode-ext":
+        flag_old_versions(items, path)
+    items.sort(key=lambda i: -i["bytes"])
+    for it in items[ITEM_KEEP:]:
+        rest_n += 1
+        rest_b += it["bytes"]
+    return items[:ITEM_KEEP], ({"count": rest_n, "bytes": rest_b} if rest_n else None)
+
+
 def build_rules(sizes, tag_totals=None):
     out = []
     pyc = (tag_totals or {}).get("pycache")
@@ -448,8 +710,19 @@ def build_rules(sizes, tag_totals=None):
         b = sizes.get(p, 0)
         if b < 50 * MB:
             continue
-        out.append({"id": rid, "group": group, "safety": safety, "title": title,
-                    "paths": [disp(p)], "bytes": b, "why": why, "cmd": cmd})
+        rule = {"id": rid, "group": group, "safety": safety, "title": title,
+                "paths": [disp(p)], "bytes": b, "why": why, "cmd": cmd}
+        if rid in PERMANENT:
+            rule["perm"] = True
+        try:
+            items, rest = rule_items(rid, p, sizes)
+        except OSError:
+            items, rest = [], None
+        if items:
+            rule["items"] = items
+            if rest:
+                rule["itemsRest"] = rest
+        out.append(rule)
     for container, group in CACHE_CONTAINERS:
         c = expand(container)
         rest, rest_bytes = [], 0
@@ -756,7 +1029,7 @@ def resolve(item_id, hard, scan_path):
                 raise Refused("this one is handled by hand, in the app that owns it")
             if cmd:
                 return [("run", cmd)]
-            kind = "delete" if (safety == "safe" or hard) else "trash"
+            kind = "delete" if (safety == "safe" or hard or rid in PERMANENT) else "trash"
             return [(kind, c) for c in children(path)]
         if rid.startswith("cache:") or rid.startswith("cache-rest:"):
             containers = {expand(c) for c, _ in CACHE_CONTAINERS}
@@ -774,9 +1047,37 @@ def resolve(item_id, hard, scan_path):
             raise Refused("outside the folders Headroom is allowed to touch: " + disp(p))
         if not os.path.lexists(p):
             raise Refused("already gone: " + disp(p))
-        permanent = hard or os.path.basename(p) in REBUILDABLE
+        permanent = hard or os.path.basename(p) in REBUILDABLE or inside_cache_rule(p)
         return [("delete" if permanent else "trash", p)]
+    if item_id.startswith("hfrepo:") or item_id.startswith("hforphans:"):
+        tag, _, shown = item_id.partition(":")
+        p = expand(shown)
+        hub = p if tag == "hforphans" else os.path.dirname(p)
+        if p != os.path.normpath(p) or hub not in {expand(h) for h in HF_HUBS} or os.path.realpath(hub) != hub:
+            raise Refused("not a Hugging Face cache folder: " + disp(p))
+        links, shared = hf_links(hub)
+        if tag == "hforphans":
+            blobs = hf_orphans(hub, links, shared)
+            steps = []
+        else:
+            if p not in links:
+                raise Refused("already gone: " + disp(p))
+            others = set().union(*[ts for repo, ts in links.items() if repo != p]) if len(links) > 1 else set()
+            blobs = sorted(links[p] - others)
+            steps = [("delete", p)]
+        for b in blobs:                                # only ever files inside this hub's blob store
+            if not b.startswith(shared + os.sep) or os.path.islink(b) or not os.path.isfile(b):
+                raise Refused("unexpected file in the blob store: " + disp(b))
+        return steps + [("delete", b) for b in blobs]
     raise Refused("unknown item")
+
+
+def inside_cache_rule(p):
+    """True for paths inside a folder this file lists as a cache (safe, or a download cache)."""
+    for rid, (safety, path, cmd) in server_rules().items():
+        if (safety == "safe" or rid in PERMANENT) and p.startswith(path + "/"):
+            return True
+    return False
 
 
 def remove(p):
@@ -867,6 +1168,82 @@ def clean_one(item_id, hard, dry, scan_path):
     except OSError:
         pass
     return res
+
+
+def in_home(p):
+    home = os.path.realpath(HOME)
+    real = os.path.realpath(p)
+    return real == home or real.startswith(home + "/")
+
+
+def list_folder(shown, budget=6.0):
+    """Live contents of one folder in the home folder, largest first. Read-only.
+    Folder sizes are measured on the spot; anything not finished within `budget`
+    seconds is returned as a partial ("at least") figure."""
+    p = expand(shown)
+    if not p.startswith("/") or p != os.path.normpath(p) or os.path.islink(p) or not os.path.isdir(p):
+        raise Refused("not a folder: " + disp(p))
+    if not in_home(p):
+        raise Refused("Headroom only looks inside your home folder")
+    deadline = time.time() + budget
+    try:
+        with os.scandir(p) as it:
+            raw = [e.path for e in it]
+    except OSError as e:
+        raise Refused(f"macOS would not open {disp(p)}: {e.strerror}")
+
+    def measure(path):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return None
+        out = {"name": os.path.basename(path), "path": disp(path), "dir": False,
+               "bytes": 0, "mtime": int(st.st_mtime)}
+        if stat.S_ISLNK(st.st_mode):
+            out["link"] = True
+        elif stat.S_ISDIR(st.st_mode):
+            total = files = 0
+            newest = st.st_mtime
+            stack = [path]
+            while stack:
+                if time.time() > deadline:
+                    out["partial"] = True
+                    break
+                try:
+                    with os.scandir(stack.pop()) as it:
+                        for e in it:
+                            try:
+                                s = e.stat(follow_symlinks=False)
+                            except OSError:
+                                continue
+                            if stat.S_ISDIR(s.st_mode):
+                                stack.append(e.path)
+                            elif stat.S_ISREG(s.st_mode):
+                                total += s.st_blocks * 512
+                                files += 1
+                                newest = max(newest, s.st_mtime)
+                except OSError:
+                    continue
+            out.update(dir=True, bytes=total, files=files, mtime=int(newest))
+        else:
+            out["bytes"] = st.st_blocks * 512
+        return out
+
+    with ThreadPoolExecutor(6) as ex:
+        entries = [e for e in ex.map(measure, raw) if e]
+    entries.sort(key=lambda e: -e["bytes"])
+    rest = entries[250:]
+    return {"path": disp(p), "entries": entries[:250],
+            "rest": {"count": len(rest), "bytes": sum(e["bytes"] for e in rest)} if rest else None}
+
+
+def reveal(shown):
+    p = expand(shown)
+    if not p.startswith("/") or p != os.path.normpath(p) or not os.path.lexists(p):
+        raise Refused("not there any more: " + disp(p))
+    if not (in_home(os.path.dirname(p)) or p.startswith("/Applications/")):
+        raise Refused("Headroom only shows items in your home folder or Applications")
+    subprocess.run(["open", "-R", p], timeout=20)
 
 
 def start_rescan(scan_path):
@@ -984,6 +1361,15 @@ def make_handler(token, port, scan_path):
                     STATE["busy"] -= 1
                     STATE["last"] = time.time()
                 self.send(200, {"results": results})
+            elif path in ("/api/list", "/api/reveal"):
+                shown = body.get("path")
+                if not isinstance(shown, str) or len(shown) > 4096:
+                    self.send(400, {"error": "Bad request."})
+                    return
+                try:
+                    self.send(200, list_folder(shown) if path == "/api/list" else (reveal(shown) or {"ok": True}))
+                except Refused as e:
+                    self.send(400, {"error": str(e)})
             elif path == "/api/rescan":
                 start_rescan(scan_path)
                 self.send(200, self.status())

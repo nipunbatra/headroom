@@ -118,6 +118,16 @@ main{min-width:0;display:flex;flex-direction:column;gap:18px}
 .meter i{display:block;height:100%;border-radius:0 3px 3px 0;background:var(--s1)}
 .rowclean{margin-top:8px;border:1px solid var(--line-2);background:var(--surface);border-radius:6px;padding:2px 10px;font-size:12.5px;font-weight:600;cursor:pointer}
 .rowclean:hover{background:var(--crit);border-color:var(--crit);color:#fff}
+.rowlinks{display:flex;flex-wrap:wrap;gap:2px 14px;margin-top:3px;font-size:13px;color:var(--ink-3)}
+.nest{list-style:none;margin:0 0 8px 34px;padding:10px 14px;background:var(--surface-2);border-radius:10px}
+.nest .row{border-top-color:var(--line-2)}
+.nest .nest{background:var(--surface);margin-left:22px}
+.nest .row{padding:8px 0}
+.nest .meter{display:none}
+.nest .rowclean{margin-top:4px}
+.subhead{display:flex;flex-wrap:wrap;gap:6px 12px;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:13px;color:var(--ink-2)}
+.subhead .mono{overflow-wrap:anywhere;min-width:0}
+.subnote{font-size:12px;color:var(--ink-3);margin:6px 0 0;max-width:72ch}
 .linkbtn{background:none;border:0;padding:0;color:var(--accent);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
 .btn{border:1px solid var(--line-2);background:var(--surface);border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer;white-space:nowrap;text-decoration:none;text-align:center}
 .btn:hover{background:var(--surface-2)}
@@ -220,6 +230,8 @@ main{min-width:0;display:flex;flex-direction:column;gap:18px}
   .panel{padding:16px}
   .hero{padding:18px 16px}
   .cta{width:100%}
+  .nest{margin-left:0;padding:8px 10px}
+  .nest .nest{margin-left:6px}
 }
 </style>
 
@@ -311,6 +323,8 @@ const C=new Map();           // id -> candidate item
 const BULK={};               // key -> [ids]
 const plan=new Map();        // ticked items
 const CLEARED=new Set();     // ids cleaned since this scan
+const OPEN=new Set();        // rule ids whose items are showing
+const TREE=new Map();        // folder path -> live listing, for "Look inside"
 const S={view:"overview",group:"all",kind:"all",q:"",tag:"all",mapNode:null,filesShown:120,hard:false,
          batch:[],dry:{},running:false,scanning:false,progress:""};
 
@@ -351,7 +365,11 @@ function prepare(){
   S.mapNode=HOMEN||D.tree;
   D.rules.forEach(r=>{
     r.pickable=!(r.cmd&&r.cmd[0]==="@");
-    if(r.pickable)cand({id:"rule:"+r.id,title:r.title,bytes:r.bytes,paths:r.paths,cmd:r.cmd,safety:r.safety});
+    if(r.pickable)cand({id:"rule:"+r.id,title:r.title,bytes:r.bytes,paths:r.paths,cmd:r.cmd,safety:r.safety,perm:!!r.perm});
+    (r.items||[]).forEach(it=>{
+      const hf=it.id.startsWith("hf");
+      if(hf||pickable(it.path))cand({id:it.id,title:r.title+": "+it.name,bytes:it.bytes,paths:it.id.startsWith("hforphans:")?[]:[it.path],cmd:null,safety:r.safety,perm:!!r.perm,child:true});
+    });
   });
   (D.found||[]).forEach(f=>{
     const t=TAGS[f.tag]||{label:f.tag};
@@ -368,21 +386,31 @@ function prepare(){
 }
 function computeX(){
   const d=D.disk, sum=(a,f)=>a.reduce((t,x)=>t+f(x),0);
+  D.rules.forEach(r=>{ r.left=Math.max(0,r.bytes-(r.items||[]).filter(i=>CLEARED.has(i.id)).reduce((t,i)=>t+i.bytes,0)); });
   const rules=D.rules.filter(r=>!CLEARED.has("rule:"+r.id));
   // leftovers that sit inside a rule's folder are already counted by that rule
   const inRule=p=>D.rules.some(r=>r.paths.some(rp=>p.startsWith(rp+"/")));
   const found=(D.found||[]).filter(f=>!CLEARED.has("file:"+f.path)&&!inRule(f.path));
   const staleFound=found.filter(f=>f.safety==="safe");
   const reviewFound=found.filter(f=>(f.tag==="venv"||f.tag==="ml-logs")&&f.safety!=="safe");
-  const x={safe:sum(rules.filter(r=>r.safety==="safe"),r=>r.bytes)+sum(staleFound,f=>f.bytes),
-           review:sum(rules.filter(r=>r.safety==="review"),r=>r.bytes)+sum(reviewFound,f=>f.bytes),
+  const x={safe:sum(rules.filter(r=>r.safety==="safe"),r=>r.left)+sum(staleFound,f=>f.bytes),
+           review:sum(rules.filter(r=>r.safety==="review"),r=>r.left)+sum(reviewFound,f=>f.bytes),
            staleFound, used:d.total-d.free};
   x.scanned=Math.min(d.scanned,x.used);
   x.system=Math.max(0,x.used-x.scanned);
   x.files=Math.max(0,x.scanned-x.safe-x.review);
   D.x=x;
 }
-const safeItems=()=>[...C.values()].filter(it=>it.safety==="safe");
+const safeItems=()=>[...C.values()].filter(it=>it.safety==="safe"&&!it.child);
+// What to say about one item inside a rule: [pill kind, label, suggested for removal]
+function verdict(it){
+  if(it.flag==="leftover")return ["review","Leftover",true];
+  const d=days(it.seen);
+  if(it.seen&&d>90)return ["review","No read in "+(d<730?Math.round(d/30.4)+" months":(d/365).toFixed(1)+" years"),true];
+  if(it.seen&&d<30)return ["keep","Read "+age(it.seen),false];
+  return null;
+}
+const suggested=r=>(r.items||[]).filter(it=>{const v=verdict(it);return v&&v[2]&&!CLEARED.has(it.id);});
 
 /* ---------- selection ---------- */
 function totalOf(items){
@@ -422,8 +450,10 @@ function buildScript(items){
   const L=["#!/bin/zsh","# Headroom cleanup: "+plural(items.length,"item")+", about "+fmt(totalOf(items)),"# Read every line before running. Quit the apps involved first.","set -u","",'echo "Free before: '+free+'"',""];
   for(const it of items){
     L.push("# "+it.title.replace(/[\x00-\x1f\x7f\u2028\u2029]+/g," ")+" ("+fmt(it.bytes)+")");
-    if(it.cmd)L.push(it.cmd);
-    else for(const p of it.paths)L.push(((it.safety==="safe"||S.hard)?"rm -rf -- ":"trash ")+shq(p));
+    if(it.id.startsWith("hforphans:"))L.push("# Only the Headroom app can tell which stored blobs nothing links to.");
+    else if(it.cmd)L.push(it.cmd);
+    else for(const p of it.paths)L.push(((it.safety==="safe"||it.perm||S.hard)?"rm -rf -- ":"trash ")+shq(p));
+    if(it.id.startsWith("hfrepo:"))L.push("# Files it keeps in the shared blob store stay behind; the Headroom app removes those too.");
     L.push("");
   }
   L.push('echo "Free after:  '+free+'"');
@@ -474,7 +504,7 @@ async function runClean(){
     let r; try{ r=(await api("/api/clean",{ids:[it.id],hard:S.hard})).results[0]; }catch(e){ r={ok:false,errors:[e.message||String(e)]}; }
     if(r.free!=null)D.disk.free=r.free;
     trashed+=r.trashed||0;
-    if(r.ok){ done++; CLEARED.add(it.id); plan.delete(it.id); C.delete(it.id); st(it.id,"ok",(r.trashed?"Moved to the Trash":"Cleaned")+(r.freed>MB?" · "+fmt(r.freed)+" back":"")); }
+    if(r.ok){ done++; CLEARED.add(it.id); plan.delete(it.id); C.delete(it.id); st(it.id,"ok",r.trashed?"Moved to the Trash":"Cleaned"+(r.freed>MB?" · "+fmt(r.freed)+" back":"")); }
     else{ failed++; st(it.id,"fail","Not finished: "+((r.errors||[]).join("; ")||"unknown reason")); }
     renderDisk();
   }
@@ -482,7 +512,7 @@ async function runClean(){
   try{ D.disk.free=(await api("/api/status")).free; }catch(e){}
   S.running=false; $("#sheet-close").disabled=false; computeX(); saveState();
   $("#run-done").innerHTML=`<p><strong>${done} of ${items.length} cleaned.</strong> Free space went from ${fmt(startFree)} to <strong>${fmt(D.disk.free)}</strong>.</p>
-    ${trashed?`<p>${plural(trashed,"item")} went to the Trash and still take up space until it is emptied.</p>`:""}
+    ${trashed?`<p>${plural(trashed,"item")} went to the Trash and still ${trashed===1?"takes":"take"} up space until it is emptied.</p>`:""}
     ${failed?`<p>${plural(failed,"item")} could not be finished. The reason is shown on each one above.</p>`:""}
     <div class="sheet-row"><span class="acts">${trashed?'<button class="btn" type="button" data-after="trash">Empty the Trash</button>':""}<button class="btn" type="button" data-after="rescan">Scan again</button></span><button class="btn primary" type="button" data-after="close">Done</button></div>`;
   showRun("done"); renderDisk(); syncPlan();
@@ -493,9 +523,59 @@ function bars(items,max){
   max=max||Math.max(...items.map(i=>i.bytes),1);
   return '<ul class="bars">'+items.map(i=>`<li${i.zoom?` data-zoom="${esc(i.zoom)}" tabindex="0" role="link"`:""} data-tip="${esc("<b>"+esc(i.name)+"</b><br>"+fmt(i.bytes)+(i.note?"<br>"+esc(i.note):""))}"><span class="b-name">${esc(i.name)}</span><span class="b-track"><i style="width:${pct(i.bytes,max).toFixed(2)}%"></i></span><span class="b-val num">${fmt(i.bytes)}</span></li>`).join("")+"</ul>";
 }
+function isOpen(p){ const n=TREE.get(p); return !!(n&&n.open); }
+function rowLinks(browse,reveal){
+  if(!LOCAL)return "";
+  const l=[];
+  if(browse)l.push(`<button class="linkbtn" type="button" data-browse="${esc(browse)}" aria-expanded="${isOpen(browse)}">${isOpen(browse)?"Hide contents":"Look inside"}</button>`);
+  if(reveal)l.push(`<button class="linkbtn" type="button" data-reveal="${esc(reveal)}">Show in Finder</button>`);
+  return l.length?`<div class="rowlinks">${l.join("")}</div>`:"";
+}
+// The live contents of one folder, each entry a normal row that can be opened, shown or cleaned.
+function browseBlock(path){
+  const n=TREE.get(path); if(!LOCAL||!n||!n.open)return "";
+  let body;
+  if(n.loading)body='<p class="subnote">Measuring…</p>';
+  else if(n.error)body=`<p class="subnote">${esc(n.error)}</p>`;
+  else if(!n.entries.length)body='<p class="subnote">This folder is empty.</p>';
+  else{
+    const max=n.entries[0].bytes||1;
+    body=`<ul class="rows">${n.entries.map(e=>row({id:"file:"+e.path,title:e.name,pills:e.dir?'<span class="pill keep">Folder</span>':(e.link?'<span class="pill keep">Alias</span>':""),bytes:e.bytes,approx:e.partial,
+      meta:(e.dir&&e.files!=null?plural(e.files,"file")+" · ":"")+"changed "+age(e.mtime),max,browse:e.dir?e.path:null,reveal:e.path})).join("")}${n.rest?none(plural(n.rest.count,"smaller item")+" not listed, "+fmt(n.rest.bytes)+" in all."):""}</ul>`;
+  }
+  const count=n.loading||n.error?"":plural(n.entries.length+(n.rest?n.rest.count:0),"item");
+  return `<li class="nest"><div class="subhead"><span class="mono">${esc(path)}</span><span>${count}</span></div>${body}</li>`;
+}
+async function toggleBrowse(path){
+  let n=TREE.get(path);
+  if(n&&n.open){ n.open=false; render(); return; }
+  if(!n){ n={open:true,loading:true,entries:[]}; TREE.set(path,n); } else n.open=true;
+  render();
+  if(!n.loading)return;
+  try{
+    const r=await api("/api/list",{path}); n.entries=r.entries; n.rest=r.rest; n.error="";
+    r.entries.forEach(e=>{ const id="file:"+e.path; if(pickable(e.path)&&!CLEARED.has(id))cand({id,title:e.name,bytes:e.bytes,paths:[e.path],cmd:null,safety:"review"}); });
+  }catch(e){ n.error=e.message; }
+  n.loading=false; render();
+}
 function row(o){
   const cl=CLEARED.has(o.id), quick=LOCAL&&!cl&&C.has(o.id)?`<br><button class="rowclean" type="button" data-clean="${esc(o.id)}" aria-label="Clean ${esc(o.title)} now">Clean</button>`:"";
-  return `<li class="row${cl?" cleared":""}">${pickBox(o.id,o.title)}<div><div class="row-title"><label for="${hashId(S.view+o.id)}">${esc(o.title)}</label>${cl?pill("safe","Cleaned"):(o.pills||"")}</div>${o.why?`<div class="row-why">${esc(o.why)}</div>`:""}${o.path?`<div class="row-path mono">${esc(o.path)}</div>`:""}${o.cmd?`<div class="row-cmd mono">${esc(o.cmd)}</div>`:""}${o.extra||""}</div><div class="row-size num">${fmt(o.bytes)}${o.meta?`<small>${esc(o.meta)}</small>`:""}${o.max?`<span class="meter"><i style="width:${pct(o.bytes,o.max).toFixed(1)}%"></i></span>`:""}${quick}</div></li>`;
+  return `<li class="row${cl?" cleared":""}"${o.anchor?` id="${o.anchor}"`:""}>${pickBox(o.id,o.title)}<div><div class="row-title"><label for="${hashId(S.view+o.id)}">${esc(o.title)}</label>${cl?pill("safe","Cleaned"):(o.pills||"")}</div>${o.why?`<div class="row-why">${esc(o.why)}</div>`:""}${o.path?`<div class="row-path mono">${esc(o.path)}</div>`:""}${o.cmd?`<div class="row-cmd mono">${esc(o.cmd)}</div>`:""}${o.extra||""}${cl?"":rowLinks(o.browse,o.reveal)}</div><div class="row-size num">${o.approx?"at least ":""}${fmt(o.bytes)}${o.meta?`<small>${esc(o.meta)}</small>`:""}${o.max?`<span class="meter"><i style="width:${pct(o.bytes,o.max).toFixed(1)}%"></i></span>`:""}${quick}</div></li>${o.after||""}${o.browse&&!cl?browseBlock(o.browse):""}`;
+}
+// The pieces inside one rule (models in a cache, projects in DerivedData, ...) with advice on each.
+function itemsBlock(r){
+  const items=r.items||[]; if(!items.length||!OPEN.has(r.id))return "";
+  const max=items[0].bytes, sug=suggested(r), word=r.group==="ml"?"downloaded ":"changed ";
+  return `<li class="nest"><div class="subhead"><span>${plural(items.length,"item")} inside, largest first${r.itemsRest?"; "+plural(r.itemsRest.count,"smaller one")+" ("+fmt(r.itemsRest.bytes)+") not listed":""}.</span>${bulk("sug-"+r.id,sug.map(i=>i.id),"suggested")}</div>
+    <ul class="rows">${items.map(it=>{const v=verdict(it);
+      return row({id:it.id,title:it.name,pills:(it.kind?`<span class="pill keep">${esc(it.kind)}</span>`:"")+(v?(v[0]==="keep"?`<span class="pill keep">${esc(v[1])}</span>`:pill(v[0],v[1])):""),why:it.note||"",path:it.path,bytes:it.bytes,max,
+        meta:it.changed?word+age(it.changed):"",browse:it.dir&&it.path.startsWith("~/")?it.path:null,reveal:it.id.startsWith("hforphans:")?null:it.path});}).join("")}</ul>
+    <p class="subnote">Suggested means a leftover, or no read recorded for 90 days. macOS notes reads only now and then, and a backup counts as one, so treat the read date as a hint and not as proof.</p></li>`;
+}
+function itemsLine(r){
+  const n=(r.items||[]).length; if(!n)return "";
+  const sug=suggested(r), sb=sug.reduce((t,i)=>t+i.bytes,0), open=OPEN.has(r.id)&&S.view==="cleanup";
+  return `<div class="rowlinks"><button class="linkbtn" type="button" data-openrule="${esc(r.id)}" aria-expanded="${open}">${open?"Hide":"Show"} the ${plural(n,"item")} inside</button>${sug.length?`<span>${sug.length} suggested · ${fmt(sb)}</span>`:""}</div>`;
 }
 const head=(t,sub,right)=>`<div class="panel-head"><div><h2>${esc(t)}</h2>${sub?`<p class="sub">${sub}</p>`:""}</div>${right||""}</div>`;
 const live=ids=>ids.filter(id=>C.has(id));
@@ -521,7 +601,7 @@ function vOverview(){
   const safe=safeItems(), safeTotal=totalOf(safe);
 
   const wins=[];
-  D.rules.filter(r=>r.safety!=="keep").forEach(r=>wins.push({id:r.pickable?"rule:"+r.id:"x:"+r.id,title:r.title,bytes:r.bytes,pills:pill(r.safety),path:r.paths.length===1?r.paths[0]:"",why:r.why}));
+  D.rules.filter(r=>r.safety!=="keep").forEach(r=>wins.push({id:r.pickable?"rule:"+r.id:"x:"+r.id,title:r.title,bytes:r.left,pills:pill(r.safety),path:r.paths.length===1?r.paths[0]:"",why:r.why,extra:itemsLine(r)}));
   if(x.staleFound.length){const b=x.staleFound.reduce((t,f)=>t+f.bytes,0);wins.push({id:"x:stale",title:"Build folders in idle projects",bytes:b,pills:pill("safe"),why:x.staleFound.length+" folders such as node_modules in projects untouched for 90 days or more.",extra:'<div><a class="linkbtn" href="#projects">Open Projects</a></div>'});}
   wins.sort((a,b)=>b.bytes-a.bytes);
   const top=wins.slice(0,8), wmax=top.length?top[0].bytes:1;
@@ -569,12 +649,14 @@ function vCleanup(){
   const sec=(k,sub)=>{
     const rs=list.filter(r=>r.safety===k); if(!rs.length)return "";
     const ids=rs.filter(r=>r.pickable).map(r=>"rule:"+r.id);
-    const total=rs.filter(r=>!CLEARED.has("rule:"+r.id)).reduce((t,r)=>t+r.bytes,0);
+    const total=rs.filter(r=>!CLEARED.has("rule:"+r.id)).reduce((t,r)=>t+r.left,0);
     return `<section class="panel">${head(SAFETY[k]+" · "+fmt(total),sub,k==="keep"?"":bulk("rules-"+k,ids,"all"))}<ul class="rows">${rs.map(r=>{
       const manual=!r.pickable, view=r.cmd&&r.cmd.startsWith("@view:");
       return row({id:"rule:"+r.id,title:r.title,pills:pill(r.safety)+`<span class="pill keep">${esc(GROUPS[r.group]||r.group)}</span>`,why:r.why,
-        path:r.paths.length===1?r.paths[0]:(r.paths.length?r.paths.length+" folders":""),cmd:r.pickable&&r.cmd?"$ "+r.cmd:"",bytes:r.bytes,max,
-        extra:view?`<div><a class="linkbtn" href="#downloaded">Open the Downloads view</a></div>`:((manual&&k!=="keep"?'<div class="row-why">Handled by hand or inside the app that owns it.</div>':"")+(r.paths.length===1&&NODES.has(r.paths[0])&&(NODES.get(r.paths[0]).c||[]).length?`<div><button class="linkbtn" type="button" data-zoom="${esc(r.paths[0])}">Open in the disk map</button></div>`:""))});
+        path:r.paths.length===1?r.paths[0]:(r.paths.length?r.paths.length+" folders":""),cmd:r.pickable&&r.cmd?"$ "+r.cmd:"",bytes:r.left,max,
+        anchor:"rule-"+hashId(r.id),after:itemsBlock(r),
+        browse:!(r.items||[]).length&&r.paths.length===1&&r.paths[0].startsWith("~/")?r.paths[0]:null,reveal:r.paths.length===1&&r.paths[0].startsWith("~")?r.paths[0]:null,
+        extra:itemsLine(r)+(view?`<div><a class="linkbtn" href="#downloaded">Open the Downloads view</a></div>`:((manual&&k!=="keep"?'<div class="row-why">Handled by hand or inside the app that owns it.</div>':"")+(r.paths.length===1&&NODES.has(r.paths[0])&&(NODES.get(r.paths[0]).c||[]).length?`<div><button class="linkbtn" type="button" data-zoom="${esc(r.paths[0])}">Open in the disk map</button></div>`:"")))});
     }).join("")}</ul></section>`;
   };
   return `<section class="panel">${head("Clean up","Known places where space piles up on a Mac, measured on this disk and sorted by size.")}
@@ -641,7 +723,7 @@ function vMap(){
   const kids=(node.c||[]), rest=node.s-kids.reduce((t,k)=>t+k.s,0), max=kids.length?kids[0].s:1;
   const rows=kids.map((k,i)=>{
     const slot=i<7?i+1:0, open=k.c&&k.c.length, id="file:"+k.p, cl=CLEARED.has(id);
-    return `<li class="row${cl?" cleared":""}">${pickBox(id,k.n)}<div><div class="row-title"><span class="sw c${slot}"></span>${open?`<button class="linkbtn" type="button" data-zoom="${esc(k.p)}">${esc(k.n)}</button>`:esc(k.n)}${cl?pill("safe","Cleaned"):(k.t&&TAGS[k.t]?`<span class="pill keep">${esc(TAGS[k.t].label)}</span>`:"")}</div><div class="row-path mono">${esc(k.p)}</div></div><div class="row-size num">${fmt(k.s)}<small>${pct(k.s,node.s).toFixed(1)}%${k.f?" · "+k.f.toLocaleString()+" files":""}</small><span class="meter"><i style="width:${pct(k.s,max).toFixed(1)}%"></i></span>${LOCAL&&!cl&&C.has(id)?`<br><button class="rowclean" type="button" data-clean="${esc(id)}">Clean</button>`:""}</div></li>`;
+    return `<li class="row${cl?" cleared":""}">${pickBox(id,k.n)}<div><div class="row-title"><span class="sw c${slot}"></span>${open?`<button class="linkbtn" type="button" data-zoom="${esc(k.p)}">${esc(k.n)}</button>`:esc(k.n)}${cl?pill("safe","Cleaned"):(k.t&&TAGS[k.t]?`<span class="pill keep">${esc(TAGS[k.t].label)}</span>`:"")}</div><div class="row-path mono">${esc(k.p)}</div>${cl||!k.p.startsWith("~/")?"":rowLinks(k.k==="f"?null:k.p,k.p)}</div><div class="row-size num">${fmt(k.s)}<small>${pct(k.s,node.s).toFixed(1)}%${k.f?" · "+k.f.toLocaleString()+" files":""}</small><span class="meter"><i style="width:${pct(k.s,max).toFixed(1)}%"></i></span>${LOCAL&&!cl&&C.has(id)?`<br><button class="rowclean" type="button" data-clean="${esc(id)}">Clean</button>`:""}</div></li>${cl||k.k==="f"?"":browseBlock(k.p)}`;
   }).join("");
   return `<section class="panel">${head("Disk map","Area is size. Each colour is one folder at this level; select a block to step inside.",node.par?`<button class="btn" type="button" data-zoom="${esc(node.par.p)}">Up one level</button>`:"")}
     <div class="crumbs">${crumbs}</div><div class="tm" id="tm"></div></section>
@@ -653,7 +735,7 @@ function filesList(){
   const q=S.q.trim().toLowerCase();
   const all=(D.bigFiles||[]).filter(f=>(S.kind==="all"||f.kind===S.kind)&&(!q||f.path.toLowerCase().includes(q)));
   const max=all.length?all[0].bytes:1, shown=all.slice(0,S.filesShown);
-  return `<ul class="rows">${shown.map(f=>row({id:"file:"+f.path,title:baseName(f.path),path:dirName(f.path),bytes:f.bytes,meta:"changed "+age(f.mtime),pills:`<span class="pill keep">${esc(f.kind)}</span>`,max})).join("")||none("No files match.")}</ul>
+  return `<ul class="rows">${shown.map(f=>row({id:"file:"+f.path,title:baseName(f.path),path:dirName(f.path),bytes:f.bytes,meta:"changed "+age(f.mtime),pills:`<span class="pill keep">${esc(f.kind)}</span>`,max,reveal:f.path.startsWith("~/")?f.path:null})).join("")||none("No files match.")}</ul>
     ${all.length>shown.length?`<p><button class="btn" type="button" data-more="1">Show ${Math.min(120,all.length-shown.length)} more of ${all.length.toLocaleString()}</button></p>`:""}`;
 }
 function vFiles(){
@@ -674,22 +756,23 @@ function vProjects(){
   return `<section class="panel">${head("Projects","Dependency and build folders inside your own projects. Idle means nothing in the project changed for 90 days.",bulk("stale",stale,"idle rebuildables"))}
     <div class="tools">${chips("tag",[["all","All"]].concat(tags.map(t=>[t,(TAGS[t]||{label:t}).label])),S.tag)}</div>
     <ul class="rows">${list.slice(0,300).map(f=>{const t=TAGS[f.tag]||{label:f.tag,how:""};
-      return row({id:"file:"+f.path,title:f.project,pills:`<span class="pill keep">${esc(t.label)}</span>`+(f.tag==="git"?"":pill(f.safety,f.safety==="safe"?"Idle, rebuildable":f.stale?"Idle":"Active")),why:t.how,path:f.path,bytes:f.bytes,meta:"project touched "+age(f.projectMtime),max});}).join("")||none("No project leftovers above 20 MB were found.")}</ul></section>`;
+      return row({id:"file:"+f.path,title:f.project,pills:`<span class="pill keep">${esc(t.label)}</span>`+(f.tag==="git"?"":pill(f.safety,f.safety==="safe"?"Idle, rebuildable":f.stale?"Idle":"Active")),why:t.how,path:f.path,bytes:f.bytes,meta:"project touched "+age(f.projectMtime),max,reveal:f.path,browse:f.tag==="git"?null:f.path});}).join("")||none("No project leftovers above 20 MB were found.")}</ul></section>`;
 }
 
 function vDownloaded(){
   const dl=D.downloads;
   if(!dl)return `<section class="panel">${head("Downloads")}<p class="empty">macOS did not let Headroom read ~/Downloads. Allow access to the Downloads folder in System Settings, then scan again.</p></section>`;
   const max=dl.length?dl[0].bytes:1, old=dl.filter(f=>days(f.mtime)>365), inst=dl.filter(f=>/\.(dmg|pkg|iso|ipsw)$/i.test(f.name));
-  return `<section class="panel">${head("Downloads","Items of 5 MB or more in ~/Downloads, largest first.",`<span class="acts">${bulk("dl-inst",inst.map(f=>"file:"+f.path),"installers")}${bulk("dl-old",old.map(f=>"file:"+f.path),"older than a year")}</span>`)}
-    <ul class="rows">${dl.map(f=>row({id:"file:"+f.path,title:f.name,bytes:f.bytes,meta:"changed "+age(f.mtime),pills:(f.dir?'<span class="pill keep">Folder</span>':"")+(/\.(dmg|pkg|iso|ipsw)$/i.test(f.name)?pill("safe","Installer"):""),max})).join("")||none("Nothing of 5 MB or more in Downloads.")}</ul></section>`;
+  return `<section class="panel">${head("Downloads","Items of 5 MB or more in ~/Downloads, largest first."+(LOCAL?" Look inside any folder to see and clean what is in it.":""),`<span class="acts">${bulk("dl-inst",inst.map(f=>"file:"+f.path),"installers")}${bulk("dl-old",old.map(f=>"file:"+f.path),"older than a year")}</span>`)}
+    ${LOCAL?`<div class="tools"><button class="btn" type="button" data-browse="~/Downloads" aria-expanded="${isOpen("~/Downloads")}">${isOpen("~/Downloads")?"Hide the full listing":"Browse everything in Downloads"}</button></div><ul class="rows">${browseBlock("~/Downloads")}</ul>`:""}
+    <ul class="rows">${dl.map(f=>row({id:"file:"+f.path,title:f.name,bytes:f.bytes,meta:"changed "+age(f.mtime),pills:(f.dir?'<span class="pill keep">Folder</span>':"")+(/\.(dmg|pkg|iso|ipsw)$/i.test(f.name)?pill("safe","Installer"):""),max,browse:f.dir?f.path:null,reveal:f.path})).join("")||none("Nothing of 5 MB or more in Downloads.")}</ul></section>`;
 }
 
 function vApps(){
   const apps=(D.apps||[]).filter(a=>a.bytes), max=apps.length?apps[0].bytes:1, known=apps.some(a=>a.lastUsed);
   return `<section class="panel">${head("Applications",(known?"Size on disk and the last time macOS recorded each app being opened.":"Size on disk. Last-opened dates are missing because Spotlight has no index on this disk.")+" Removing an app here leaves its support files behind; check the disk map under ~/Library for those.")}
     <ul class="rows">${apps.map(a=>{const d=days(a.lastUsed);
-      return row({id:"file:"+a.path,title:a.name,path:a.path,bytes:a.bytes,meta:a.lastUsed?"opened "+age(a.lastUsed):(known?"no open recorded":""),pills:d>180&&a.lastUsed?pill("review","Unused 6+ months"):"",max});}).join("")}</ul></section>`;
+      return row({id:"file:"+a.path,title:a.name,path:a.path,bytes:a.bytes,meta:a.lastUsed?"opened "+age(a.lastUsed):(known?"no open recorded":""),pills:d>180&&a.lastUsed?pill("review","Unused 6+ months"):"",max,reveal:a.path});}).join("")}</ul></section>`;
 }
 
 function vScanning(){
@@ -729,7 +812,11 @@ function render(){
   if(S.view==="map")drawMap();
   syncPlan();
 }
-function go(){ const v=location.hash.slice(1); S.view=VIEWS[v]?v:"overview"; render(); window.scrollTo(0,0); }
+function go(){
+  const v=location.hash.slice(1); S.view=VIEWS[v]?v:"overview"; render();
+  const el=S.jump&&document.getElementById(S.jump); S.jump=null;
+  if(el)el.scrollIntoView({block:"start"}); else window.scrollTo(0,0);
+}
 function zoom(p){ const n=NODES.get(p); if(!n)return; S.mapNode=n; if(S.view!=="map"){ if(location.hash==="#map")render(); else location.hash="#map"; } else render(); }
 
 /* ---------- scanning (app only) ---------- */
@@ -757,9 +844,16 @@ document.addEventListener("change",e=>{
 });
 document.addEventListener("input",e=>{ if(e.target.id==="file-q"){ S.q=e.target.value; S.filesShown=120; $("#files-list").innerHTML=filesList(); syncPlan(); } });
 document.addEventListener("click",e=>{
-  const t=e.target.closest("[data-zoom],[data-bulk],[data-cleanall],[data-cleansafe],[data-clean],[data-chip],[data-more],[data-unpick],[data-after],#plan-open,#plan-clear,#sheet-close,#copy,#run-go,#run-cancel,#run-yes,#rescan,#sheet");
+  const t=e.target.closest("[data-zoom],[data-browse],[data-reveal],[data-openrule],[data-bulk],[data-cleanall],[data-cleansafe],[data-clean],[data-chip],[data-more],[data-unpick],[data-after],#plan-open,#plan-clear,#sheet-close,#copy,#run-go,#run-cancel,#run-yes,#rescan,#sheet");
   if(!t)return;
   if(t.dataset.zoom){ zoom(t.dataset.zoom); }
+  else if(t.dataset.browse){ toggleBrowse(t.dataset.browse); }
+  else if(t.dataset.reveal){ api("/api/reveal",{path:t.dataset.reveal}).catch(()=>{}); }
+  else if(t.dataset.openrule){
+    const id=t.dataset.openrule;
+    if(S.view!=="cleanup"){ OPEN.add(id); S.group="all"; S.jump="rule-"+hashId(id); location.hash="#cleanup"; }
+    else{ if(OPEN.has(id))OPEN.delete(id); else OPEN.add(id); render(); }
+  }
   else if(t.dataset.bulk){ const ids=live(BULK[t.dataset.bulk]||[]), allOn=ids.every(id=>plan.has(id)); ids.forEach(id=>setPick(id,!allOn)); syncPlan(); }
   else if(t.dataset.cleanall){ openSheet(live(BULK[t.dataset.cleanall]||[]).map(id=>C.get(id))); }
   else if(t.dataset.cleansafe){ openSheet(safeItems()); }
