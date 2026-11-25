@@ -52,11 +52,26 @@ It runs without Claude: open `dist/Headroom.app`, it scans, you click Clean.
   `/api/reveal` shows an item in Finder. "Look inside" in the UI is built on these.
 - Rules in `PERMANENT` are download caches: removed outright, like other caches.
 
+## Sizes: on disk versus what deleting returns
+
+- `read_dir()` uses `getattrlistbulk` (one call per folder: name, type, mtime, flags, id, link
+  count, allocated size, length, clone id, extended flags). It falls back to `os.scandir` if the
+  file system refuses. Verified against `lstat` entry by entry; mounted volumes and cloud
+  placeholders are flagged so the walk never enters them.
+- Only files with `EF_MAY_SHARE_BLOCKS` are asked for `ATTR_CMNEXT_PRIVATESIZE` and
+  `ATTR_CMNEXT_CLONE_REFCNT` (`clone_info()`), because that call is the slow one. Checked on
+  970k files: no file without the flag shares anything.
+- A clone group's shared bytes are credited to the deepest folder that holds every copy, and
+  only if the copies seen equal the copy count macOS reports. So `frees` for a folder is exact:
+  private bytes plus shared bytes of groups that live entirely inside it.
+- JSON: `bytes` is size on disk, `frees` appears only when smaller. Tree nodes use `s` and `r`.
+  `disk.unique` is the scanned total with shared space counted once. The UI's `fr()` reads it;
+  plan totals, the safe/review sums and the big Clean button all use the returnable figure.
+- Never walk a folder without the cloud-placeholder skip: listing a dataless folder makes macOS
+  fetch it. A profiling script did this once in `~/Library`.
+
 ## Known gaps
 
-- APFS clones are counted once per copy, so sizes overstate what deleting returns. Measured on
-  this Mac: clearing a 24 GB uv cache returned about 5 GB. Fix: `getattrlist` with
-  `ATTR_CMNEXT_PRIVATESIZE` in a native scanner.
 - Still needs a Python 3 on the machine (Homebrew or the Xcode Command Line Tools). A Swift
   scanner would remove that.
 - Without Full Disk Access, `~/.Trash`, Mail, Messages and Photos internals are unreadable.

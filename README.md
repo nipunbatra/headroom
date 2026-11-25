@@ -48,8 +48,10 @@ Without it the Trash, Mail, Messages and Photos internals cannot be measured.
 
 ## Good to know
 
-- Sizes can overstate what you get back. APFS clones are counted once per copy, so a cache whose
-  files are cloned into your environments returns less than its listed size when cleared.
+- Sizes for cleaning are what deleting actually returns. APFS lets copies share space (package
+  managers, Finder duplicates and browser updates all do it), so a 24 GB cache can return 5 GB.
+  Headroom asks macOS for each cloned file's private size and how many copies exist, and shows
+  the on-disk size next to the returnable one where they differ.
 - This is a beta that has run on one Mac. Read the confirmation before you agree to it.
 
 ## Working on it

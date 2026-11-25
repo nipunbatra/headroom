@@ -16,8 +16,15 @@ image are reported at what they really occupy. Hard links are counted once.
 Cloud placeholders (iCloud / Drive files that are not downloaded) are skipped
 and never fetched. APFS clones are counted once per copy, so totals can run
 slightly above what the disk reports.
+
+Folders are read with getattrlistbulk, which returns a whole folder in one call
+along with each file's clone id and a "may share blocks" flag. Files with that
+flag are asked for their private size (the bytes that come back at once if the
+file is deleted), so every size has a second figure: what deleting returns.
 """
 import argparse
+import ctypes
+import errno
 import glob
 import hashlib
 import hmac
@@ -29,6 +36,7 @@ import re
 import secrets
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -274,6 +282,160 @@ PYCACHE_CMD = 'find "$HOME" -path "$HOME/Library" -prune -o -type d -name __pyca
 CACHE_CONTAINERS = [("~/Library/Caches", "caches"), ("~/.cache", "caches")]
 
 
+# ------------------------------------------------------------ reading folders
+class _AttrList(ctypes.Structure):
+    _fields_ = [("bitmapcount", ctypes.c_ushort), ("reserved", ctypes.c_ushort),
+                ("commonattr", ctypes.c_uint32), ("volattr", ctypes.c_uint32), ("dirattr", ctypes.c_uint32),
+                ("fileattr", ctypes.c_uint32), ("forkattr", ctypes.c_uint32)]
+
+
+# common: returned-attrs | name | object type | modified | flags | file id
+# folder: mount status.   file: link count | allocated | data length
+# extended (in the fork slot): clone id | extended flags
+_BULK_AL = _AttrList(5, 0, 0x80000000 | 0x1 | 0x8 | 0x400 | 0x40000 | 0x2000000, 0, 0x4, 0x1 | 0x4 | 0x200, 0x100 | 0x200)
+_PRIV_AL = _AttrList(5, 0, 0, 0, 0, 0, 0x8)                 # private size only
+_CLONE_AL = _AttrList(5, 0, 0, 0, 0, 0, 0x8 | 0x1000)       # private size | number of clone copies
+COPIES = [True]                                             # False once the system refuses the copy count
+_HEAD = struct.Struct("<I5IiIIqqIQ")    # length, returned x5, name (offset, length), type, mtime s/ns, flags, id
+_FILE = struct.Struct("<IqqQQ")         # links, allocated, length, clone id, extended flags
+_MOUNT = struct.Struct("<I")
+_BUFSIZE = 1 << 18
+_tls = threading.local()
+ROOT_DEV = [None]
+try:
+    _libc = ctypes.CDLL(None, use_errno=True)
+    _libc.getattrlistbulk.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64]
+    _libc.getattrlist.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
+    FAST = [True]
+except (OSError, AttributeError):
+    FAST = [False]
+
+
+def _buffers():
+    b = getattr(_tls, "bulk", None)
+    if b is None:
+        b = _tls.bulk = ctypes.create_string_buffer(_BUFSIZE)
+        _tls.priv = ctypes.create_string_buffer(16)
+    return b, _tls.priv
+
+
+def read_dir(path):
+    """One folder's entries as (name, kind, mtime, id, skip, links, bytes, length, clone id, may share).
+    kind is 1 for a file, 2 for a folder; other things are left out. skip marks a folder that must
+    not be entered: 1 a mounted volume, 2 a cloud placeholder that would download if opened."""
+    if FAST[0]:
+        buf = _buffers()[0]
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        out = []
+        try:
+            while True:
+                count = _libc.getattrlistbulk(fd, ctypes.byref(_BULK_AL), buf, _BUFSIZE, 0x28)
+                if count <= 0:
+                    if count < 0 and not out:
+                        e = ctypes.get_errno()
+                        if e in (errno.EINVAL, errno.ENOTSUP):
+                            FAST[0] = False            # this file system cannot do it: use the plain reader
+                            break
+                        raise OSError(e, os.strerror(e))
+                    return out
+                off = 0
+                for _ in range(count):
+                    h = _HEAD.unpack_from(buf, off)
+                    at = off + 24 + h[6]
+                    name = buf[at:at + h[7] - 1].decode("utf-8", "surrogateescape")
+                    if h[8] == 1:
+                        if h[4]:
+                            links, alloc, length, cid, ef = _FILE.unpack_from(buf, off + 64)
+                            out.append((name, 1, h[9], h[12], 0, links, alloc, length, cid, ef & 1))
+                    elif h[8] == 2:
+                        mounted = h[3] and _MOUNT.unpack_from(buf, off + 64)[0] & 1
+                        out.append((name, 2, h[9], h[12], 1 if mounted else 2 if h[11] & SF_DATALESS else 0,
+                                    0, 0, 0, 0, 0))
+                    off += h[0]
+        finally:
+            os.close(fd)
+    out = []
+    with os.scandir(path) as it:
+        for e in it:
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                out.append((e.name, 1, int(st.st_mtime), st.st_ino, 0, st.st_nlink, st.st_blocks * 512,
+                            st.st_size, 0, 0))
+            elif stat.S_ISDIR(st.st_mode):
+                skip = (1 if ROOT_DEV[0] is not None and st.st_dev != ROOT_DEV[0]
+                        else 2 if getattr(st, "st_flags", 0) & SF_DATALESS else 0)
+                out.append((e.name, 2, int(st.st_mtime), st.st_ino, skip, 0, 0, 0, 0, 0))
+    return out
+
+
+def private_bytes(path):
+    """Bytes that come back at once if this file is deleted: 0 for a pure clone. None if unknown."""
+    if not FAST[0]:
+        return None
+    buf = _buffers()[1]
+    if _libc.getattrlist(os.fsencode(path), ctypes.byref(_PRIV_AL), buf, 16, 0x21) != 0:
+        return None
+    return struct.unpack_from("<Iq", buf)[1]
+
+
+def clone_info(path):
+    """(bytes deleting this file returns, how many clone copies exist or None if the system cannot say)."""
+    if not FAST[0]:
+        return None, None
+    buf = _buffers()[1]
+    if COPIES[0]:
+        if _libc.getattrlist(os.fsencode(path), ctypes.byref(_CLONE_AL), buf, 16, 0x21) == 0:
+            length, private, copies = struct.unpack_from("<IqI", buf)
+            return private, copies
+        if ctypes.get_errno() == errno.EINVAL:
+            COPIES[0] = False                # older macOS: no copy count
+    return private_bytes(path), None
+
+
+def measure(path, deadline=None):
+    """(bytes, bytes deleting it returns, files, newest change, cut short) for one folder tree.
+    Clones whose every copy sits inside the tree count once toward what deleting returns."""
+    total = priv = files = newest = 0
+    groups = {}
+    stack = [path]
+    partial = False
+    while stack:
+        if deadline and time.time() > deadline:
+            partial = True
+            break
+        d = stack.pop()
+        try:
+            entries = read_dir(d)
+        except OSError:
+            continue
+        for fn, kind, mtime, ino, skip, links, sz, length, cid, share in entries:
+            if kind == 1:
+                pv = sz
+                if share and sz:
+                    p, copies = clone_info(d + "/" + fn)
+                    if p is not None and p < sz:
+                        pv = p
+                        g = groups.get(cid)
+                        if g is None:
+                            groups[cid] = [sz - p, 1, copies]
+                        else:
+                            g[0] = max(g[0], sz - p)
+                            g[1] += 1
+                total += sz
+                priv += pv
+                files += 1
+                if mtime > newest:
+                    newest = mtime
+            elif not skip:
+                stack.append(d + "/" + fn)
+    # shared space comes back only when every copy of the clone is inside this tree
+    priv += sum(shared for shared, n, copies in groups.values() if n > 1 and (copies is None or n >= copies))
+    return total, min(total, priv), files, newest, partial
+
+
 def expand(p):
     return os.path.expanduser(p)
 
@@ -288,15 +450,14 @@ def disp(p):
 
 
 def scan(root, min_node, max_depth):
-    root_dev = os.lstat(root).st_dev
+    ROOT_DEV[0] = os.lstat(root).st_dev
     strip = len(root) if root != "/" and root == DATA else 0
     home_real = (root + HOME) if strip else HOME
 
-    sizes, ext, big, found, denied = {}, {}, [], [], []
+    sizes, privs, groups, ext, big, found, denied = {}, {}, {}, {}, [], [], []
     seen_ino = set()
     tag_totals = {}
     stats = {"files": 0, "dirs": 0, "dataless": 0}
-    S_ISREG, S_ISDIR = stat.S_ISREG, stat.S_ISDIR
     last = [time.time()]
 
     def classify(name, parent, path):
@@ -321,55 +482,65 @@ def scan(root, min_node, max_depth):
         return None
 
     def walk(path, name, depth, opaque, visible, tagok):
-        total = 0
-        nfiles = 0
+        total = priv = nfiles = 0
         kids = None if opaque else []
+        lpath = path[strip:] or "/"
         try:
-            it = os.scandir(path)
+            entries = read_dir(path)
         except OSError:
-            denied.append(path[strip:] or "/")
-            return 0, 0, None
+            denied.append(lpath)
+            return 0, 0, None, 0
         subdirs = []
-        with it:
-            for e in it:
-                try:
-                    st = e.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                m = st.st_mode
-                if S_ISREG(m):
-                    sz = st.st_blocks * 512
-                    if st.st_nlink > 1:
-                        if st.st_ino in seen_ino:
-                            continue
-                        seen_ino.add(st.st_ino)
-                    total += sz
-                    nfiles += 1
-                    fn = e.name
-                    i = fn.rfind(".")
-                    x = fn[i + 1:].lower() if 0 < i and len(fn) - i <= 12 else ""
-                    t = ext.get(x)
-                    if t is None:
-                        ext[x] = [sz, 1]
-                    else:
-                        t[0] += sz
-                        t[1] += 1
-                    if sz >= BIG_FILE:
-                        big.append((sz, e.path[strip:], st.st_mtime, st.st_size, st.st_ino, opaque, x))
-                        if kids is not None and sz >= min_node and depth < max_depth:
-                            kids.append({"n": fn, "s": sz, "k": "f"})
-                elif S_ISDIR(m):
-                    if st.st_dev != root_dev:
+        for fn, kind, mtime, ino, skip, links, sz, length, cid, share in entries:
+            if kind == 1:
+                if links > 1:
+                    if ino in seen_ino:
                         continue
-                    if getattr(st, "st_flags", 0) & SF_DATALESS:
-                        stats["dataless"] += 1
-                        continue
-                    subdirs.append((e.name, e.path))
+                    seen_ino.add(ino)
+                pv = sz
+                if share and sz:
+                    p, copies = clone_info(path + "/" + fn)
+                    if p is not None and p < sz:
+                        pv = p
+                        g = groups.get(cid)            # clone group: [deepest folder holding every copy seen, shared bytes, copies seen, copies that exist]
+                        if g is None:
+                            groups[cid] = [lpath, sz - p, 1, copies]
+                        else:
+                            top = g[0]
+                            while top != "/" and not (lpath == top or lpath.startswith(top + "/")):
+                                top = os.path.dirname(top)
+                            g[0] = top
+                            if sz - p > g[1]:
+                                g[1] = sz - p
+                            g[2] += 1
+                total += sz
+                priv += pv
+                nfiles += 1
+                i = fn.rfind(".")
+                x = fn[i + 1:].lower() if 0 < i and len(fn) - i <= 12 else ""
+                t = ext.get(x)
+                if t is None:
+                    ext[x] = [sz, 1]
+                else:
+                    t[0] += sz
+                    t[1] += 1
+                if sz >= BIG_FILE:
+                    big.append((sz, (lpath if lpath != "/" else "") + "/" + fn, mtime, length, ino, opaque, x, pv))
+                    if kids is not None and sz >= min_node and depth < max_depth:
+                        leaf = {"n": fn, "s": sz, "k": "f"}
+                        if pv < sz:
+                            leaf["r"] = pv
+                        kids.append(leaf)
+            elif skip:
+                if skip == 2:
+                    stats["dataless"] += 1
+            else:
+                subdirs.append((fn, path + "/" + fn))
         stats["files"] += nfiles
         stats["dirs"] += 1
         if time.time() - last[0] > 5:
             last[0] = time.time()
-            print(f"  {stats['files']:>10,} files  {path[strip:][:90]}", file=sys.stderr, flush=True)
+            print(f"  {stats['files']:>10,} files  {lpath[:90]}", file=sys.stderr, flush=True)
 
         at_home = path == home_real
         tag = None
@@ -382,38 +553,74 @@ def scan(root, min_node, max_depth):
                     tag = classify(dn, path, dp)
                 if tag or dn.endswith(OPAQUE_SUFFIXES):
                     c_opaque = True
-            s, n, node = walk(dp, dn, depth + 1, c_opaque, not opaque, c_tagok)
+            s, n, node, pr = walk(dp, dn, depth + 1, c_opaque, not opaque, c_tagok)
             total += s
+            priv += pr
             nfiles += n
             if tag:
                 tt = tag_totals.setdefault(tag, [0, 0])
                 tt[0] += s
                 tt[1] += 1
                 if s >= FOUND_MIN:
-                    found.append((tag, dp[strip:], s, n))
+                    found.append((tag, dp[strip:], s, n, pr))
                 if node is not None:
                     node["t"] = tag
             if node is not None and kids is not None:
                 kids.append(node)
 
         if depth <= SIZE_DEPTH and total >= MB:
-            sizes[path[strip:] or "/"] = total
+            sizes[lpath] = total
+            if priv < total:
+                privs[lpath] = priv
         if visible and total >= min_node and depth <= max_depth:
             node = {"n": name, "s": total, "f": nfiles}
+            if priv < total:
+                node["r"] = priv
             if kids:
                 kids.sort(key=lambda k: -k["s"])
                 node["c"] = kids
             if opaque:
                 node["o"] = 1
-            return total, nfiles, node
-        return total, nfiles, None
+            return total, nfiles, node, priv
+        return total, nfiles, None, priv
 
     sys.setrecursionlimit(20000)
-    total, nfiles, tree = walk(root, "Macintosh HD", 0, False, True, False)
+    total, nfiles, tree, priv = walk(root, "Macintosh HD", 0, False, True, False)
     if tree is None:
         tree = {"n": "Macintosh HD", "s": total, "f": nfiles}
-    return dict(total=total, tree=tree, sizes=sizes, ext=ext, big=big, found=found,
-                denied=denied, stats=stats, tag_totals=tag_totals)
+
+    # A clone group whose every copy sits under a folder is freed when that folder goes:
+    # credit its shared bytes to the deepest such folder and to everything above it.
+    extra = {}
+    for top, shared, seen, copies in groups.values():
+        if seen < 2 or (copies is not None and seen < copies):
+            continue                                   # a copy lives somewhere the scan did not reach
+        while True:
+            extra[top] = extra.get(top, 0) + shared
+            if top == "/" or not top:
+                break
+            top = os.path.dirname(top)
+
+    def settle(node, lpath):
+        if "c" in node or "r" in node:
+            r = node.get("r", node["s"]) + (extra.get(lpath, 0) if node.get("k") != "f" else 0)
+            if r < node["s"]:
+                node["r"] = r
+            else:
+                node.pop("r", None)
+        for c in node.get("c", ()):
+            settle(c, (lpath if lpath != "/" else "") + "/" + c["n"])
+    settle(tree, root[strip:] or "/")
+
+    def frees(lpath):
+        """What deleting this folder returns, or None when the scan did not keep its size."""
+        if lpath not in sizes:
+            return None
+        return min(sizes[lpath], privs.get(lpath, sizes[lpath]) + extra.get(lpath, 0))
+
+    unique = min(total, priv + extra.get(root[strip:] or "/", 0))
+    return dict(total=total, unique=unique, tree=tree, sizes=sizes, ext=ext, big=big, found=found,
+                denied=denied, stats=stats, tag_totals=tag_totals, frees=frees, extra=extra)
 
 
 def project_mtime(parent, skip):
@@ -545,7 +752,14 @@ def hf_orphans(hub, links=None, shared=None):
     return out
 
 
-def hf_items(hub, sizes):
+def with_frees(obj, frees):
+    """Record what deleting returns, when the scan knows it and it is less than the size on disk."""
+    if frees is not None and frees < obj["bytes"]:
+        obj["frees"] = frees
+    return obj
+
+
+def hf_items(hub, sizes, frees=None):
     links, shared = hf_links(hub)
     owners = {}
     for ts in links.values():
@@ -554,6 +768,8 @@ def hf_items(hub, sizes):
     items = []
     for repo, ts in links.items():
         own = sizes.get(repo, 0) if sizes is not None else folder_bytes(repo)
+        own_back = frees(repo) if frees else None
+        back = own if own_back is None else own_back
         seen, changed = last_seen(repo)
         mine = common = 0
         for t in ts:
@@ -564,6 +780,8 @@ def hf_items(hub, sizes):
             b = st.st_blocks * 512
             if owners[t] == 1:
                 mine += b
+                pb = private_bytes(t)
+                back += b if pb is None else pb
             else:
                 common += b
             seen = max(seen, int(st.st_atime), int(st.st_mtime))
@@ -571,20 +789,25 @@ def hf_items(hub, sizes):
         kind, _, rest = os.path.basename(repo).partition("--")
         item = {"id": "hfrepo:" + disp(repo), "name": rest.replace("--", "/"), "kind": HF_KIND[kind],
                 "path": disp(repo), "bytes": own + mine, "seen": seen, "changed": changed}
+        with_frees(item, back)
         if common >= 50 * MB:
             item["note"] = f"Another {common / GB:.1f} GB is shared with other entries and stays until they go too."
         items.append(item)
     orphans = hf_orphans(hub, links, shared)
-    b = 0
+    b = back = 0
     for p in orphans:
         try:
-            b += os.lstat(p).st_blocks * 512
+            one = os.lstat(p).st_blocks * 512
         except OSError:
-            pass
+            continue
+        pb = private_bytes(p)
+        b += one
+        back += one if pb is None else pb
     if b >= ITEM_MIN:
-        items.append({"id": "hforphans:" + disp(hub), "name": "Leftover blobs", "kind": "Leftover",
-                      "path": disp(shared), "bytes": b, "seen": 0, "changed": 0, "flag": "leftover",
-                      "note": f"{len(orphans):,} stored files that no model or dataset links to any more."})
+        items.append(with_frees({"id": "hforphans:" + disp(hub), "name": "Leftover blobs", "kind": "Leftover",
+                                 "path": disp(shared), "bytes": b, "seen": 0, "changed": 0, "flag": "leftover",
+                                 "note": f"{len(orphans):,} stored files that no model or dataset links to any more."},
+                                back))
     return items
 
 
@@ -642,7 +865,7 @@ def flag_old_versions(items, rule_path):
                           else "VS Code has marked this version for removal.")
 
 
-def rule_items(rid, path, sizes):
+def rule_items(rid, path, sizes, frees=None):
     """The independent pieces inside a rule's folder, largest first, each with its size and age.
     `sizes` is the scan's folder-size table; pass None to measure folders directly."""
     key = re.sub(r"-\d+$", "", rid)
@@ -651,7 +874,7 @@ def rule_items(rid, path, sizes):
     rest_n = rest_b = 0
     for hub in (path, os.path.join(path, "hub")):
         if hub in hubs and os.path.isdir(hub):
-            for it in hf_items(hub, sizes):
+            for it in hf_items(hub, sizes, frees):
                 if it["bytes"] >= ITEM_MIN:
                     items.append(it)
                 else:
@@ -671,11 +894,13 @@ def rule_items(rid, path, sizes):
             continue                                    # a parent of other items, not an item itself
         if os.path.isdir(p):
             b = sizes.get(p, 0) if sizes is not None else folder_bytes(p)
+            back = frees(p) if frees else None
         else:
             try:
                 b = os.lstat(p).st_blocks * 512
             except OSError:
                 continue
+            back = private_bytes(p)
         if b < ITEM_MIN:
             rest_n += 1
             rest_b += b
@@ -684,18 +909,19 @@ def rule_items(rid, path, sizes):
         item = {"id": "file:" + disp(p), "path": disp(p), "bytes": b, "seen": seen, "changed": changed}
         if os.path.isdir(p):
             item["dir"] = True
+        with_frees(item, back)
         decorate(key, item, p, path)
         items.append(item)
     if key == "vscode-ext":
         flag_old_versions(items, path)
-    items.sort(key=lambda i: -i["bytes"])
+    items.sort(key=lambda i: -i.get("frees", i["bytes"]))
     for it in items[ITEM_KEEP:]:
         rest_n += 1
         rest_b += it["bytes"]
     return items[:ITEM_KEEP], ({"count": rest_n, "bytes": rest_b} if rest_n else None)
 
 
-def build_rules(sizes, tag_totals=None):
+def build_rules(sizes, tag_totals=None, frees=None):
     out = []
     pyc = (tag_totals or {}).get("pycache")
     if pyc and pyc[0] >= 50 * MB:
@@ -714,8 +940,9 @@ def build_rules(sizes, tag_totals=None):
                 "paths": [disp(p)], "bytes": b, "why": why, "cmd": cmd}
         if rid in PERMANENT:
             rule["perm"] = True
+        with_frees(rule, frees(p) if frees else None)
         try:
-            items, rest = rule_items(rid, p, sizes)
+            items, rest = rule_items(rid, p, sizes, frees)
         except OSError:
             items, rest = [], None
         if items:
@@ -725,7 +952,7 @@ def build_rules(sizes, tag_totals=None):
         out.append(rule)
     for container, group in CACHE_CONTAINERS:
         c = expand(container)
-        rest, rest_bytes = [], 0
+        rest, rest_bytes, rest_back = [], 0, 0
         try:
             names = sorted(os.listdir(c))
         except OSError:
@@ -735,27 +962,29 @@ def build_rules(sizes, tag_totals=None):
             if p in specific or not os.path.isdir(p) or os.path.islink(p):
                 continue
             b = sizes.get(p, 0)
+            back = frees(p) if frees else None
             if b >= 150 * MB:
-                out.append({"id": "cache:" + disp(p), "group": group, "safety": "safe",
-                            "title": "Cache: " + n, "paths": [disp(p)], "bytes": b,
-                            "why": "An app's cache folder. The app rebuilds it when it next runs; quit the app first.",
-                            "cmd": None})
+                out.append(with_frees({"id": "cache:" + disp(p), "group": group, "safety": "safe",
+                                       "title": "Cache: " + n, "paths": [disp(p)], "bytes": b,
+                                       "why": "An app's cache folder. The app rebuilds it when it next runs; quit the app first.",
+                                       "cmd": None}, back))
             elif b > 0:
                 rest.append(disp(p))
                 rest_bytes += b
+                rest_back += b if back is None else back
         if rest_bytes >= 20 * MB:
-            out.append({"id": "cache-rest:" + container, "group": group, "safety": "safe",
-                        "title": f"{len(rest)} smaller caches in {container}", "paths": rest,
-                        "bytes": rest_bytes,
-                        "why": "Small per-app cache folders. Rebuilt on demand.", "cmd": None})
-    out.sort(key=lambda r: -r["bytes"])
+            out.append(with_frees({"id": "cache-rest:" + container, "group": group, "safety": "safe",
+                                   "title": f"{len(rest)} smaller caches in {container}", "paths": rest,
+                                   "bytes": rest_bytes,
+                                   "why": "Small per-app cache folders. Rebuilt on demand.", "cmd": None}, rest_back))
+    out.sort(key=lambda r: -r.get("frees", r["bytes"]))
     return out
 
 
 def find_dupes(big, strip_root):
     by_size = {}
     own = HOME + "/"
-    for sz, path, mtime, apparent, ino, opaque, x in big:
+    for sz, path, mtime, apparent, ino, opaque, x, pv in big:
         # only the user's own folders: caches, app data and package stores hold
         # deliberate copies (and APFS clones) that are not worth flagging
         rel = path[len(own):] if path.startswith(own) else ""
@@ -789,7 +1018,7 @@ def find_dupes(big, strip_root):
     return groups[:60]
 
 
-def app_list(sizes):
+def app_list(sizes, frees=None):
     apps = []
     for base in ("/Applications", "/Applications/Utilities", expand("~/Applications")):
         try:
@@ -799,7 +1028,8 @@ def app_list(sizes):
         for n in names:
             if n.endswith(".app"):
                 p = os.path.join(base, n)
-                apps.append({"name": n[:-4], "path": disp(p), "bytes": sizes.get(p, 0), "_p": p})
+                apps.append(with_frees({"name": n[:-4], "path": disp(p), "bytes": sizes.get(p, 0), "_p": p},
+                                       frees(p) if frees else None))
 
     def last_used(a):
         try:
@@ -817,7 +1047,7 @@ def app_list(sizes):
     return apps
 
 
-def downloads(sizes):
+def downloads(sizes, frees=None):
     d = expand("~/Downloads")
     out = []
     try:
@@ -831,8 +1061,9 @@ def downloads(sizes):
                     continue
                 isdir = stat.S_ISDIR(st.st_mode)
                 b = sizes.get(e.path, 0) if isdir else st.st_blocks * 512
+                back = (frees(e.path) if frees else None) if isdir else private_bytes(e.path)
                 if b >= 5 * MB:
-                    out.append({"name": e.name, "bytes": b, "mtime": int(st.st_mtime), "dir": isdir})
+                    out.append(with_frees({"name": e.name, "bytes": b, "mtime": int(st.st_mtime), "dir": isdir}, back))
     except OSError:
         return None
     out.sort(key=lambda x: -x["bytes"])
@@ -887,18 +1118,20 @@ def run_scan(args):
     top_ext = sorted(((x or "(none)", b, n) for x, (b, n) in r["ext"].items()), key=lambda t: -t[1])[:40]
 
     found = []
-    for tag, path, b, n in r["found"]:
+    frees, extra = r["frees"], r["extra"]
+    for tag, path, b, n, pr in r["found"]:
         if tag == "pycache":
             continue
         parent = os.path.dirname(path)
-        found.append({"tag": tag, "path": disp(path), "bytes": b, "files": n,
-                      "projectMtime": project_mtime(strip_root + parent, os.path.basename(path))})
-    found.sort(key=lambda f: -f["bytes"])
+        found.append(with_frees({"tag": tag, "path": disp(path), "bytes": b, "files": n,
+                                 "projectMtime": project_mtime(strip_root + parent, os.path.basename(path))},
+                                pr + extra.get(path, 0)))
+    found.sort(key=lambda f: -f.get("frees", f["bytes"]))
 
     big = sorted(r["big"], key=lambda t: -t[0])
-    big_files = [{"path": disp(p), "bytes": sz, "mtime": int(mt),
-                  "kind": EXT_KIND.get(x, "Everything else")}
-                 for sz, p, mt, ap, ino, opq, x in big if not opq][:400]
+    big_files = [with_frees({"path": disp(p), "bytes": sz, "mtime": int(mt),
+                             "kind": EXT_KIND.get(x, "Everything else")}, pv)
+                 for sz, p, mt, ap, ino, opq, x, pv in big if not opq][:400]
 
     if root == DATA or root == "/":
         mark_home(r["tree"])
@@ -906,6 +1139,7 @@ def run_scan(args):
         r["tree"]["n"] = disp(root)
     disk = disk_info()
     disk["scanned"] = r["total"]
+    disk["unique"] = r["unique"]        # the same files with clone-shared space counted once
     out = {
         "version": 1,
         "scannedAt": int(time.time()),
@@ -918,13 +1152,13 @@ def run_scan(args):
         "kinds": sorted(({"kind": k, "bytes": b, "files": n} for k, (b, n) in kinds.items()),
                         key=lambda k: -k["bytes"]),
         "exts": [{"ext": x, "bytes": b, "files": n} for x, b, n in top_ext],
-        "rules": build_rules(sizes, r["tag_totals"]),
+        "rules": build_rules(sizes, r["tag_totals"], frees),
         "found": found[:600],
         "tagTotals": {k: {"bytes": v[0], "count": v[1]} for k, v in r["tag_totals"].items()},
         "bigFiles": big_files,
         "dupes": find_dupes(r["big"], strip_root),
-        "downloads": downloads(sizes),
-        "apps": app_list(sizes),
+        "downloads": downloads(sizes, frees),
+        "apps": app_list(sizes, frees),
         "denied": sorted((disp(p) for p in r["denied"]), key=lambda p: (not p.startswith("~"), p))[:200],
         "deniedCount": len(r["denied"]),
     }
@@ -933,7 +1167,7 @@ def run_scan(args):
     with open(tmp, "w") as f:
         json.dump(out, f, separators=(",", ":"), ensure_ascii=False)
     os.replace(tmp, args.out)
-    print(f"Wrote {args.out}: {r['stats']['files']:,} files, {r['total'] / GB:.1f} GB "
+    print(f"Wrote {args.out}: {r['stats']['files']:,} files, {r['total'] / GB:.1f} GB ({r['unique'] / GB:.1f} GB unique) "
           f"in {out['seconds']}s", file=sys.stderr)
 
 
@@ -1192,7 +1426,7 @@ def list_folder(shown, budget=6.0):
     except OSError as e:
         raise Refused(f"macOS would not open {disp(p)}: {e.strerror}")
 
-    def measure(path):
+    def one(path):
         try:
             st = os.lstat(path)
         except OSError:
@@ -1202,35 +1436,19 @@ def list_folder(shown, budget=6.0):
         if stat.S_ISLNK(st.st_mode):
             out["link"] = True
         elif stat.S_ISDIR(st.st_mode):
-            total = files = 0
-            newest = st.st_mtime
-            stack = [path]
-            while stack:
-                if time.time() > deadline:
-                    out["partial"] = True
-                    break
-                try:
-                    with os.scandir(stack.pop()) as it:
-                        for e in it:
-                            try:
-                                s = e.stat(follow_symlinks=False)
-                            except OSError:
-                                continue
-                            if stat.S_ISDIR(s.st_mode):
-                                stack.append(e.path)
-                            elif stat.S_ISREG(s.st_mode):
-                                total += s.st_blocks * 512
-                                files += 1
-                                newest = max(newest, s.st_mtime)
-                except OSError:
-                    continue
-            out.update(dir=True, bytes=total, files=files, mtime=int(newest))
+            total, back, files, newest, partial = measure(path, deadline)
+            out.update(dir=True, bytes=total, files=files, mtime=int(max(newest, st.st_mtime)))
+            if partial:
+                out["partial"] = True
+            else:
+                with_frees(out, back)
         else:
             out["bytes"] = st.st_blocks * 512
+            with_frees(out, private_bytes(path))
         return out
 
     with ThreadPoolExecutor(6) as ex:
-        entries = [e for e in ex.map(measure, raw) if e]
+        entries = [e for e in ex.map(one, raw) if e]
     entries.sort(key=lambda e: -e["bytes"])
     rest = entries[250:]
     return {"path": disp(p), "entries": entries[:250],
