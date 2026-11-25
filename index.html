@@ -1,0 +1,842 @@
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>Headroom Disk Analyser</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a Mac utility. A floating rail holds the views and the disk gauge; the
+   working pane leads with a level meter (headroom, as on a mixing desk) and one
+   Clean button. Selections collect in a bar along the bottom edge. */
+:root{
+  --bg:#e8ebf0; --side:#dce0e7; --surface:#fbfcfd; --surface-2:#f0f2f6; --ink:#14171c; --ink-2:#4a5160; --ink-3:#6f7786;
+  --line:#dde0e6; --line-2:#c3c8d2; --accent:#3346c9; --accent-ink:#ffffff; --track:#dfe3ea;
+  --good:#0ca30c; --good-text:#006300; --warn:#fab219; --warn-text:#7a5200; --crit:#d03b3b; --crit-text:#b02a2a;
+  --s0:#9aa1ad; --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --s6:#008300; --s7:#6250d6; --s8:#e34948;
+  --on-s4:#0b0b0b; --shadow:0 1px 2px rgba(20,23,28,.06),0 8px 24px rgba(20,23,28,.06);
+  --font-display:"Bricolage Grotesque","Instrument Sans",-apple-system,system-ui,sans-serif;
+  --font-body:"Instrument Sans",-apple-system,system-ui,"Segoe UI",sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d0f12; --side:#15181d; --surface:#181b20; --surface-2:#20242b; --ink:#eceef2; --ink-2:#b6bcc8; --ink-3:#8a92a0;
+    --line:#292e37; --line-2:#3b424e; --accent:#8e9cff; --accent-ink:#0d0f12; --track:#272c35;
+    --good-text:#3fc43f; --warn-text:#fab219; --crit-text:#f08080;
+    --s0:#596170; --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s6:#0ca30c; --s7:#9085e9; --s8:#e66767;
+    --on-s4:#ffffff; --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.25); color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d0f12; --side:#15181d; --surface:#181b20; --surface-2:#20242b; --ink:#eceef2; --ink-2:#b6bcc8; --ink-3:#8a92a0;
+  --line:#292e37; --line-2:#3b424e; --accent:#8e9cff; --accent-ink:#0d0f12; --track:#272c35;
+  --good-text:#3fc43f; --warn-text:#fab219; --crit-text:#f08080;
+  --s0:#596170; --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s6:#0ca30c; --s7:#9085e9; --s8:#e66767;
+  --on-s4:#ffffff; --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.25); color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--font-mono);font-size:12px}
+a{color:inherit}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:5px}
+
+.shell{max-width:1340px;margin:0 auto;display:grid;grid-template-columns:232px minmax(0,1fr);gap:20px;align-items:start;
+  padding-block:16px 120px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.side{position:sticky;top:calc(env(safe-area-inset-top,0px) + 16px);min-height:calc(100vh - 32px);display:flex;flex-direction:column;gap:18px;
+  background:var(--side);border-radius:16px;padding:16px 12px 12px}
+.brand{display:flex;align-items:center;gap:9px;margin:2px 6px 0;font-family:var(--font-display);font-weight:700;font-size:20px;letter-spacing:-.01em}
+.brand svg{width:22px;height:22px;flex:none}
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav a{display:flex;align-items:center;gap:9px;text-decoration:none;padding:7px 9px;border-radius:8px;color:var(--ink-2);font-weight:500}
+.nav a svg{width:16px;height:16px;flex:none;opacity:.8}
+.nav a span{flex:1;min-width:0}
+.nav a small{font-size:12px;font-weight:400;opacity:.7;font-variant-numeric:tabular-nums;white-space:nowrap}
+.nav a:hover{background:color-mix(in srgb,var(--ink) 7%,transparent);color:var(--ink)}
+.nav a[aria-current="page"]{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.disk{margin-top:auto;background:var(--surface);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.disk-free{font-family:var(--font-display);font-weight:700;font-size:22px;letter-spacing:-.02em;line-height:1.1}
+.disk-free small{display:block;font-family:var(--font-body);font-size:12px;font-weight:400;color:var(--ink-3);letter-spacing:0;margin-top:2px}
+.disk-bar{height:6px;border-radius:3px;background:var(--track);overflow:hidden}
+.disk-bar i{display:block;height:100%;background:var(--s1);border-radius:0 3px 3px 0}
+.disk-bar.crit i{background:var(--crit)} .disk-bar.tight i{background:var(--warn)}
+.disk-meta{font-size:12px;color:var(--ink-3)}
+main{min-width:0;display:flex;flex-direction:column;gap:18px}
+
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px 20px;min-width:0}
+.panel h2{font-family:var(--font-display);font-size:17px;font-weight:700;margin:0;text-wrap:balance}
+.panel-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:8px 12px;margin-bottom:10px}
+.sub{color:var(--ink-3);font-size:13px;margin:2px 0 0;max-width:68ch}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.col{display:flex;flex-direction:column;gap:18px;min-width:0}
+.eyebrow{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);margin:0}
+
+.hero{display:flex;flex-direction:column;gap:18px;padding:22px 24px}
+.hero-top{display:flex;flex-wrap:wrap;gap:18px 40px;justify-content:space-between;align-items:flex-end}
+.hero h1{font-family:var(--font-display);font-weight:500;font-size:clamp(20px,2.6vw,26px);line-height:1.15;margin:6px 0 8px;letter-spacing:-.01em;text-wrap:balance}
+.hero h1 b{font-weight:700;font-size:clamp(46px,8vw,76px);letter-spacing:-.035em;display:block;line-height:1}
+.lede{margin:0;max-width:56ch;color:var(--ink-2)}
+.cta{display:flex;flex-direction:column;gap:8px;align-items:stretch;width:min(270px,100%)}
+.cta .btn.big{padding:12px 18px;font-size:16px;border-radius:11px;display:flex;flex-direction:column;align-items:center;line-height:1.25}
+.cta .btn.big small{font-weight:400;font-size:12.5px;opacity:.85}
+.cta p{margin:0;font-size:12.5px;color:var(--ink-3);text-align:center}
+.level{display:flex;gap:2px;height:48px}
+.level i{flex:1 1 0;min-width:0;border-radius:2.5px;background:var(--track)}
+.level i.safe{background:var(--good)} .level i.review{background:var(--warn)} .level i.files{background:var(--s1)}
+.level i.system{background:var(--s0)} .level i.free{background:var(--track);box-shadow:inset 0 0 0 1px var(--line-2)}
+.zone{display:flex;font-size:11.5px;color:var(--ink-3);margin-top:-12px}
+.zone span:first-child{flex:9 1 0}
+.zone span:last-child{flex:1 1 0;min-width:0;border-top:2px solid var(--crit);padding-top:3px;display:flex;justify-content:flex-end;white-space:nowrap}
+.legend{display:flex;flex-wrap:wrap;gap:6px 20px;font-size:13px;color:var(--ink-2);margin:0;padding:0;list-style:none}
+.legend li{display:flex;align-items:center;gap:7px}
+.legend b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.sw{width:10px;height:10px;border-radius:3px;flex:none;display:inline-block}
+.sw.safe{background:var(--good)} .sw.review{background:var(--warn)} .sw.files{background:var(--s1)} .sw.system{background:var(--s0)}
+.sw.free{background:var(--track);box-shadow:inset 0 0 0 1px var(--line-2)}
+
+.pill{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;padding:1px 8px 1px 6px;border-radius:99px;border:1px solid var(--line-2);white-space:nowrap;vertical-align:2px}
+.pill svg{width:11px;height:11px;flex:none}
+.pill.safe{color:var(--good-text);border-color:color-mix(in srgb,var(--good) 45%,transparent);background:color-mix(in srgb,var(--good) 9%,transparent)}
+.pill.review{color:var(--warn-text);border-color:color-mix(in srgb,var(--warn) 60%,transparent);background:color-mix(in srgb,var(--warn) 13%,transparent)}
+.pill.keep{color:var(--ink-2);background:var(--surface-2)}
+.pill.crit{color:var(--crit-text);border-color:color-mix(in srgb,var(--crit) 50%,transparent);background:color-mix(in srgb,var(--crit) 9%,transparent)}
+
+.rows{list-style:none;margin:0;padding:0}
+.row{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:4px 12px;align-items:start;padding:11px 0;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.row.cleared>div{opacity:.5}
+.row .pick,.row .nopick{margin:3px 0 0;width:16px;height:16px}
+.pick{accent-color:var(--accent);cursor:pointer}
+.nopick{color:var(--ink-3);text-align:center;line-height:16px;font-size:12px}
+.row-title{font-weight:600;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;overflow-wrap:anywhere}
+.row-title label{cursor:pointer}
+.row-why{color:var(--ink-2);font-size:13px;max-width:70ch}
+.row-path{color:var(--ink-3);overflow-wrap:anywhere}
+.row-cmd{color:var(--ink-2);background:var(--surface-2);border-radius:5px;padding:2px 7px;display:inline-block;margin-top:4px;overflow-wrap:anywhere}
+.row-size{text-align:right;font-weight:600;min-width:88px;white-space:nowrap}
+.row-size small{display:block;font-weight:400;color:var(--ink-3);font-size:12px}
+.meter{display:block;height:6px;border-radius:3px;background:var(--track);margin-top:6px;overflow:hidden}
+.meter i{display:block;height:100%;border-radius:0 3px 3px 0;background:var(--s1)}
+.rowclean{margin-top:8px;border:1px solid var(--line-2);background:var(--surface);border-radius:6px;padding:2px 10px;font-size:12.5px;font-weight:600;cursor:pointer}
+.rowclean:hover{background:var(--crit);border-color:var(--crit);color:#fff}
+.linkbtn{background:none;border:0;padding:0;color:var(--accent);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.btn{border:1px solid var(--line-2);background:var(--surface);border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer;white-space:nowrap;text-decoration:none;text-align:center}
+.btn:hover{background:var(--surface-2)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.primary:hover{background:var(--accent);opacity:.9}
+.btn.danger{background:var(--crit);color:#fff;border-color:var(--crit)}
+.btn.danger:hover{background:var(--crit);opacity:.9}
+.btn[disabled]{opacity:.5;cursor:default}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line-2);background:transparent;border-radius:99px;padding:3px 11px;font-size:13px;font-weight:500;cursor:pointer;color:var(--ink-2)}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.search{border:1px solid var(--line-2);background:var(--surface);color:var(--ink);border-radius:8px;padding:6px 10px;font:inherit;min-width:0;width:min(280px,100%)}
+.tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px}
+.acts{display:flex;flex-wrap:wrap;gap:8px}
+
+.bars{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.bars li{display:grid;grid-template-columns:minmax(0,34%) minmax(0,1fr) 74px;gap:10px;align-items:center;font-size:13px}
+.bars li[data-zoom]{cursor:pointer}
+.bars li[data-zoom]:hover .b-name{text-decoration:underline}
+.b-name{overflow-wrap:anywhere}
+.b-track{height:10px;display:block}
+.b-track i{display:block;height:100%;min-width:2px;background:var(--s1);border-radius:0 4px 4px 0}
+.b-val{text-align:right;color:var(--ink-2)}
+.notes{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px;color:var(--ink-2);font-size:13px}
+.notes b{color:var(--ink)}
+
+.crumbs{display:flex;flex-wrap:wrap;gap:2px 4px;align-items:center;font-size:13px;margin-bottom:10px}
+.crumbs button{background:none;border:0;padding:2px 5px;border-radius:5px;cursor:pointer;color:var(--accent);font-weight:600}
+.crumbs span{color:var(--ink-3)}
+.crumbs strong{padding:2px 5px}
+.tm{position:relative;width:100%;height:clamp(340px,50vw,540px);overflow:hidden;border-radius:6px}
+.tm-g{position:absolute}
+.tm-h{position:absolute;left:1px;top:0;right:1px;height:19px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;line-height:19px}
+.tm-h small{font-weight:400;color:var(--ink-3)}
+.tm-t{position:absolute;border-radius:3px;color:#fff;font-weight:500;font-size:11.5px;line-height:1.3;padding:3px 6px;overflow:hidden;cursor:pointer}
+.tm-t span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-t span+span{opacity:.85}
+.tm-t.rest{background:color-mix(in srgb,var(--c) 32%,var(--surface));color:var(--ink-2)}
+.tm-t:hover{box-shadow:inset 0 0 0 2px var(--ink)}
+.c0{--c:var(--s0)} .c1{--c:var(--s1)} .c2{--c:var(--s2)} .c3{--c:var(--s3)} .c4{--c:var(--s4)}
+.c5{--c:var(--s5)} .c6{--c:var(--s6)} .c7{--c:var(--s7)} .c8{--c:var(--s8)}
+.tm-t,.sw[class*=" c"]{background:var(--c)}
+.tm-t.c4:not(.rest){color:var(--on-s4)}
+
+.tip{position:fixed;z-index:60;pointer-events:none;background:var(--ink);color:var(--bg);padding:7px 10px;border-radius:8px;font-size:12.5px;line-height:1.4;max-width:min(340px,calc(100vw - 24px));overflow-wrap:anywhere}
+.tip b{font-weight:600}
+
+.planbar{position:fixed;left:0;right:0;bottom:0;z-index:40;
+  padding-block:0 calc(14px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));pointer-events:none}
+.planbar-in{max-width:760px;margin:0 auto;background:var(--ink);color:var(--bg);border-radius:14px;padding:10px 12px 10px 18px;box-shadow:var(--shadow);
+  display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;pointer-events:auto}
+.planbar strong{font-family:var(--font-display);font-size:20px;font-weight:700}
+.planbar .btn{background:transparent;color:var(--bg);border-color:color-mix(in srgb,var(--bg) 40%,transparent)}
+.planbar .btn.primary{background:var(--bg);color:var(--ink);border-color:var(--bg)}
+.sheet{position:fixed;inset:0;z-index:50;background:color-mix(in srgb,#000 45%,transparent);display:flex;justify-content:flex-end}
+.sheet-in{background:var(--surface);width:min(620px,100%);height:100%;overflow:auto;display:flex;flex-direction:column;gap:14px;
+  padding:calc(20px + env(safe-area-inset-top,0px)) max(20px,env(safe-area-inset-right,0px)) calc(20px + env(safe-area-inset-bottom,0px)) 20px}
+.sheet h2{font-family:var(--font-display);font-size:22px;margin:0}
+.sheet pre{margin:0;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-family:var(--font-mono);font-size:12px;line-height:1.55;max-height:40vh;white-space:pre;user-select:all}
+.sheet-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.planlist{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:10px}
+.planlist li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;align-items:baseline;padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
+.planlist li:first-child{border-top:0}
+.planlist .nm{min-width:0;overflow-wrap:anywhere;font-weight:600}
+.planlist .act,.planlist .st{grid-column:1/-1;font-size:12px;overflow-wrap:anywhere}
+.planlist .act{color:var(--ink-3)}
+.planlist .act:empty,.planlist .st:empty{display:none}
+.st{font-weight:600} .st.ok{color:var(--good-text)} .st.fail{color:var(--crit-text)} .st.work{color:var(--ink-2)}
+.check{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--ink-2)}
+.confirm,.done{border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px}
+.confirm{border:1px solid color-mix(in srgb,var(--crit) 50%,transparent);background:color-mix(in srgb,var(--crit) 7%,transparent)}
+.done{border:1px solid var(--line);background:var(--surface-2)}
+.confirm p,.done p{margin:0}
+.scriptbox summary{cursor:pointer;font-weight:600;color:var(--ink-2);margin-bottom:10px}
+.scriptbox>div{margin-top:10px}
+.empty{padding:36px 8px;color:var(--ink-2);max-width:60ch}
+.empty code,.notes code,.sub code{font-family:var(--font-mono);font-size:12px;background:var(--surface-2);padding:1px 5px;border-radius:4px}
+.scan{padding:40px 28px;display:flex;flex-direction:column;gap:16px}
+.scan h1{font-family:var(--font-display);font-size:clamp(26px,4vw,38px);font-weight:700;letter-spacing:-.02em;margin:0;line-height:1.1}
+.scan .count{font-family:var(--font-display);font-size:22px;font-weight:700;margin:0}
+
+@media (prefers-reduced-motion:no-preference){
+  .b-track i,.meter i,.disk-bar i{transition:width .3s ease}
+  .level.sweep i{animation:sweep 2.4s ease-in-out infinite}
+  @keyframes sweep{0%,100%{background:var(--track)}35%{background:var(--s1)}}
+}
+@media (max-width:860px){
+  .shell{grid-template-columns:minmax(0,1fr);gap:12px}
+  .side{position:static;min-height:0;padding:12px;gap:10px}
+  .nav{flex-direction:row;overflow-x:auto;gap:4px}
+  .nav a{white-space:nowrap;flex:none}
+  .nav a small{display:none}
+  .disk{flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-top:0}
+  .disk-bar{flex:1 1 100%;order:3}
+  .disk-meta{display:none}
+  .grid2{grid-template-columns:minmax(0,1fr)}
+  .bars li{grid-template-columns:minmax(0,1fr) 74px}
+  .b-name{grid-column:1/-1}
+  .panel{padding:16px}
+  .hero{padding:18px 16px}
+  .cta{width:100%}
+}
+</style>
+
+<div class="shell">
+  <aside class="side">
+    <p class="brand"><svg viewBox="0 0 22 22" aria-hidden="true"><rect x="0.5" y="12" width="4" height="9" rx="1.2" fill="var(--good)"/><rect x="6" y="8" width="4" height="13" rx="1.2" fill="var(--s1)"/><rect x="11.5" y="4" width="4" height="17" rx="1.2" fill="var(--warn)"/><rect x="17" y="1" width="4" height="20" rx="1.2" fill="var(--crit)"/></svg>Headroom</p>
+    <nav class="nav" id="nav" aria-label="Views"></nav>
+    <div class="disk" id="disk"></div>
+  </aside>
+  <main id="main"><div class="panel empty">Opening…</div></main>
+</div>
+<div class="planbar" id="planbar" hidden>
+  <div class="planbar-in">
+    <div><strong class="num" id="plan-total"></strong> <span id="plan-count"></span></div>
+    <div class="acts">
+      <button class="btn" id="plan-clear" type="button">Clear</button>
+      <button class="btn primary" id="plan-open" type="button">Review script</button>
+    </div>
+  </div>
+</div>
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet-in" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-row"><h2 id="sheet-title">Clean up</h2><button class="btn" id="sheet-close" type="button">Close</button></div>
+    <p class="sub" id="sheet-sum"></p>
+    <ul class="planlist" id="planlist"></ul>
+    <label class="check"><input type="checkbox" id="hard"> <span>Skip the Trash and delete everything outright. Normally only caches and rebuildable folders are deleted; everything else goes to the Trash, where it still takes space until you empty it.</span></label>
+    <div id="run-area" hidden>
+      <div class="sheet-row" id="run-idle"><span class="sub">You will be asked once more before anything is removed.</span><button class="btn danger" id="run-go" type="button">Clean up</button></div>
+      <div class="confirm" id="run-confirm" hidden><p id="run-what"></p><div class="sheet-row"><button class="btn" id="run-cancel" type="button">Cancel</button><button class="btn danger" id="run-yes" type="button">Yes, clean up now</button></div></div>
+      <div class="done" id="run-done" hidden></div>
+    </div>
+    <details class="scriptbox" id="script-wrap">
+      <summary>The same cleanup as a Terminal script</summary>
+      <pre id="script" tabindex="0"></pre>
+      <div class="sheet-row">
+        <span class="sub" id="copy-state"></span>
+        <button class="btn" id="copy" type="button">Copy script</button>
+      </div>
+    </details>
+  </div>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+(function(){
+"use strict";
+const GB=1e9, MB=1e6, DAY=86400;
+const LOCAL=!!(window.HEADROOM&&window.HEADROOM.token);   // true inside the Headroom app, false in a read-only snapshot
+const $=(s,el)=>(el||document).querySelector(s);
+const $$=(s,el)=>Array.from((el||document).querySelectorAll(s));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function fmt(b){
+  if(b>=GB){const g=b/GB;return (g>=100?g.toFixed(0):g>=10?g.toFixed(1):g.toFixed(2))+" GB";}
+  if(b>=MB)return (b/MB).toFixed(b>=100*MB?0:1)+" MB";
+  return (b>0?Math.max(1,Math.round(b/1e3)):0)+" KB";
+}
+const pct=(a,b)=>b?(100*a/b):0;
+const plural=(n,w)=>n.toLocaleString()+" "+w+(n===1?"":"s");
+async function api(path,body){
+  const h={"X-Headroom-Token":window.HEADROOM.token}; if(body)h["Content-Type"]="application/json";
+  const r=await fetch(path,{method:body?"POST":"GET",headers:h,body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.error||("Headroom did not answer ("+r.status+")"));
+  return j;
+}
+const ICON={
+  safe:'<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6.5l2.6 2.6L10 3.5"/></svg>',
+  review:'<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 6s1.8-3.4 5-3.4S11 6 11 6 9.2 9.4 6 9.4 1 6 1 6z"/><circle cx="6" cy="6" r="1.4" fill="currentColor" stroke="none"/></svg>',
+  keep:'<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="5.5" width="7" height="5" rx="1"/><path d="M4 5.5V4a2 2 0 014 0v1.5"/></svg>',
+  crit:'<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 2.5v4.2M6 9.3v.2"/></svg>'
+};
+const NAVI=p=>`<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const SAFETY={safe:"Safe to clear",review:"Review first",keep:"Leave alone"};
+const pill=(k,label)=>`<span class="pill ${k}">${ICON[k]||""}${esc(label||SAFETY[k])}</span>`;
+const GROUPS={caches:"Caches",dev:"Developer tools",ml:"Models and datasets",containers:"Containers and VMs",system:"System",personal:"Personal data"};
+const TAGS={
+  node_modules:{label:"node_modules",rebuild:true,how:"npm install brings it back"},
+  "rust-target":{label:"Rust build output",rebuild:true,how:"cargo build brings it back"},
+  "web-build":{label:"Web build output",rebuild:true,how:"the next build brings it back"},
+  toolcache:{label:"Tool cache",rebuild:true,how:"rebuilt on the next run"},
+  pods:{label:"CocoaPods",rebuild:true,how:"pod install brings it back"},
+  venv:{label:"Python environment",rebuild:false,how:"recreate from requirements or pyproject"},
+  "ml-logs":{label:"Experiment logs",rebuild:false,how:"runs, metrics and checkpoints; gone once deleted"},
+  git:{label:"Git history",rebuild:false,how:"shrink with git gc --aggressive; never delete"}
+};
+
+let D=null, NODES=new Map(), HOMEN=null, NOW=0;
+const C=new Map();           // id -> candidate item
+const BULK={};               // key -> [ids]
+const plan=new Map();        // ticked items
+const CLEARED=new Set();     // ids cleaned since this scan
+const S={view:"overview",group:"all",kind:"all",q:"",tag:"all",mapNode:null,filesShown:120,hard:false,
+         batch:[],dry:{},running:false,scanning:false,progress:""};
+
+function age(ts){
+  if(!ts)return "no record";
+  const d=Math.floor((NOW-ts)/DAY);
+  if(d<1)return "today"; if(d<2)return "yesterday"; if(d<60)return d+" days ago";
+  if(d<730)return Math.round(d/30.4)+" months ago";
+  return (d/365).toFixed(1)+" years ago";
+}
+const days=ts=>ts?(NOW-ts)/DAY:Infinity;
+const baseName=p=>p.slice(p.lastIndexOf("/")+1);
+const dirName=p=>p.slice(0,Math.max(1,p.lastIndexOf("/")));
+function hashId(s){let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h+s.charCodeAt(i))|0;return "p"+(h>>>0).toString(36);}
+
+function cand(item){ if(!C.has(item.id))C.set(item.id,item); return item; }
+function pickBox(id,label){
+  if(CLEARED.has(id))return '<span class="nopick" title="Cleaned">✓</span>';
+  if(!C.has(id))return '<span class="nopick" title="Handled by hand">–</span>';
+  return `<input type="checkbox" class="pick" id="${hashId(S.view+id)}" data-pick="${esc(id)}"${plan.has(id)?" checked":""} aria-label="Select ${esc(label||"item")} for cleanup">`;
+}
+// Must stay in step with user_path_ok() in scan.py, which enforces it again before deleting.
+function pickable(p){
+  if(/\/\.git(\/|$)/.test(p))return false;
+  if(!p.startsWith("~/"))return /^\/Applications\/[^/]+\.app$/.test(p);
+  const seg=p.split("/");
+  if(seg[1]==="Library")return seg.length>=4;
+  return seg.length>=3;
+}
+
+/* ---------- derive everything once ---------- */
+function prepare(){
+  NOW=D.scannedAt;
+  (function rec(n,par,path){
+    n.par=par; n.p=path; NODES.set(path,n); if(n.h)HOMEN=n;
+    (n.c||[]).forEach(c=>rec(c,n,c.h?"~":(path==="/"?"":path)+"/"+c.n));
+  })(D.tree,null,D.root||"/");
+  S.mapNode=HOMEN||D.tree;
+  D.rules.forEach(r=>{
+    r.pickable=!(r.cmd&&r.cmd[0]==="@");
+    if(r.pickable)cand({id:"rule:"+r.id,title:r.title,bytes:r.bytes,paths:r.paths,cmd:r.cmd,safety:r.safety});
+  });
+  (D.found||[]).forEach(f=>{
+    const t=TAGS[f.tag]||{label:f.tag};
+    f.stale=days(f.projectMtime)>90; f.project=baseName(dirName(f.path));
+    f.safety=(t.rebuild&&f.stale)?"safe":"review";
+    if(f.tag!=="git")cand({id:"file:"+f.path,title:t.label+" in "+f.project,bytes:f.bytes,paths:[f.path],cmd:null,safety:f.safety});
+  });
+  (D.bigFiles||[]).forEach(f=>{ if(pickable(f.path))cand({id:"file:"+f.path,title:baseName(f.path),bytes:f.bytes,paths:[f.path],cmd:null,safety:"review"}); });
+  (D.dupes||[]).forEach(g=>g.files.forEach(f=>{ if(pickable(f.path))cand({id:"file:"+f.path,title:baseName(f.path),bytes:g.bytes,paths:[f.path],cmd:null,safety:"review"}); }));
+  (D.downloads||[]).forEach(f=>{ f.path="~/Downloads/"+f.name; cand({id:"file:"+f.path,title:f.name,bytes:f.bytes,paths:[f.path],cmd:null,safety:"review"}); });
+  (D.apps||[]).forEach(a=>{ if(pickable(a.path)&&a.bytes)cand({id:"file:"+a.path,title:a.name+" (app)",bytes:a.bytes,paths:[a.path],cmd:null,safety:"review"}); });
+  NODES.forEach((n,p)=>{ if(pickable(p))cand({id:"file:"+p,title:n.n,bytes:n.s,paths:[p],cmd:null,safety:"review"}); });
+  computeX();
+}
+function computeX(){
+  const d=D.disk, sum=(a,f)=>a.reduce((t,x)=>t+f(x),0);
+  const rules=D.rules.filter(r=>!CLEARED.has("rule:"+r.id));
+  // leftovers that sit inside a rule's folder are already counted by that rule
+  const inRule=p=>D.rules.some(r=>r.paths.some(rp=>p.startsWith(rp+"/")));
+  const found=(D.found||[]).filter(f=>!CLEARED.has("file:"+f.path)&&!inRule(f.path));
+  const staleFound=found.filter(f=>f.safety==="safe");
+  const reviewFound=found.filter(f=>(f.tag==="venv"||f.tag==="ml-logs")&&f.safety!=="safe");
+  const x={safe:sum(rules.filter(r=>r.safety==="safe"),r=>r.bytes)+sum(staleFound,f=>f.bytes),
+           review:sum(rules.filter(r=>r.safety==="review"),r=>r.bytes)+sum(reviewFound,f=>f.bytes),
+           staleFound, used:d.total-d.free};
+  x.scanned=Math.min(d.scanned,x.used);
+  x.system=Math.max(0,x.used-x.scanned);
+  x.files=Math.max(0,x.scanned-x.safe-x.review);
+  D.x=x;
+}
+const safeItems=()=>[...C.values()].filter(it=>it.safety==="safe");
+
+/* ---------- selection ---------- */
+function totalOf(items){
+  const sorted=items.slice().sort((a,b)=>(a.paths[0]||"").length-(b.paths[0]||"").length);
+  const seen=[]; let total=0;
+  for(const it of sorted){
+    if(it.paths.length&&it.paths.every(p=>seen.some(c=>p===c||p.startsWith(c+"/"))))continue;
+    total+=it.bytes; seen.push(...it.paths);
+  }
+  return total;
+}
+function saveState(){ try{localStorage.setItem("headroom.state",JSON.stringify({at:D.scannedAt,plan:[...plan.keys()],cleared:[...CLEARED]}));}catch(e){} }
+function loadState(){
+  try{
+    const r=JSON.parse(localStorage.getItem("headroom.state")||"null"); if(!r||r.at!==D.scannedAt)return;
+    (r.cleared||[]).forEach(id=>{CLEARED.add(id);C.delete(id);});
+    (r.plan||[]).forEach(id=>{if(C.has(id))plan.set(id,C.get(id));});
+    computeX();
+  }catch(e){}
+}
+function setPick(id,on){ if(!C.has(id))return; if(on)plan.set(id,C.get(id)); else plan.delete(id); }
+function syncPlan(){
+  $$("[data-pick]").forEach(el=>{el.checked=plan.has(el.dataset.pick);});
+  const n=plan.size; $("#planbar").hidden=!n;
+  if(n){ $("#plan-total").textContent=fmt(totalOf([...plan.values()])); $("#plan-count").textContent="selected · "+plural(n,"item"); }
+  saveState();
+}
+function shq(p){
+  let pre=""; if(p==="~")return '"$HOME"';
+  if(p.startsWith("~/")){pre="$HOME";p=p.slice(1);}
+  return '"'+pre+p.replace(/(["\\$`])/g,"\\$1")+'"';
+}
+const ORDER={safe:0,review:1,keep:2};
+function buildScript(items){
+  items=items.slice().sort((a,b)=>ORDER[a.safety]-ORDER[b.safety]||b.bytes-a.bytes);
+  const free="$(df -H /System/Volumes/Data | awk 'NR==2{print $4}')";
+  const L=["#!/bin/zsh","# Headroom cleanup: "+plural(items.length,"item")+", about "+fmt(totalOf(items)),"# Read every line before running. Quit the apps involved first.","set -u","",'echo "Free before: '+free+'"',""];
+  for(const it of items){
+    L.push("# "+it.title.replace(/[\x00-\x1f\x7f\u2028\u2029]+/g," ")+" ("+fmt(it.bytes)+")");
+    if(it.cmd)L.push(it.cmd);
+    else for(const p of it.paths)L.push(((it.safety==="safe"||S.hard)?"rm -rf -- ":"trash ")+shq(p));
+    L.push("");
+  }
+  L.push('echo "Free after:  '+free+'"');
+  return L.join("\n");
+}
+
+/* ---------- the cleanup sheet ---------- */
+function showRun(which){ ["idle","confirm","done"].forEach(k=>{$("#run-"+k).hidden=k!==which;}); }
+function openSheet(items){
+  if(S.running)return;
+  S.batch=items.filter(Boolean); if(!S.batch.length)return;
+  S.dry={};
+  $("#sheet").hidden=false; renderSheet(); $("#sheet-close").focus();
+}
+function closeSheet(){ if(S.running)return; $("#sheet").hidden=true; S.batch=[]; render(); }
+function renderSheet(){
+  const items=S.batch.slice().sort((a,b)=>b.bytes-a.bytes), total=totalOf(items);
+  $("#sheet-sum").textContent=plural(items.length,"item")+", about "+fmt(total)+". Overlapping folders are counted once.";
+  $("#planlist").innerHTML=items.map(it=>`<li><span class="nm">${esc(it.title)} ${pill(it.safety)}</span><span class="num" style="white-space:nowrap">${fmt(it.bytes)} <button class="linkbtn" data-unpick="${esc(it.id)}" type="button" aria-label="Remove ${esc(it.title)} from this cleanup">remove</button></span><span class="act" data-act="${esc(it.id)}">${esc(S.dry[it.id]||"")}</span><span class="st" data-st="${esc(it.id)}"></span></li>`).join("");
+  $("#script").textContent=buildScript(items);
+  $("#script-wrap").open=!LOCAL;
+  $("#copy-state").textContent=LOCAL?"For running it yourself in Terminal.":"This page is a read-only snapshot and cannot delete anything. Open the Headroom app on your Mac to clean with one click, or paste this into Terminal.";
+  $("#hard").disabled=false;
+  $("#run-area").hidden=!LOCAL;
+  if(LOCAL){ showRun("idle"); $("#run-go").textContent="Clean up "+plural(items.length,"item")+" · "+fmt(total); refreshDry(); }
+}
+let dryTimer;
+function refreshDry(){
+  clearTimeout(dryTimer);
+  dryTimer=setTimeout(async()=>{
+    const ids=S.batch.map(it=>it.id); if(!ids.length)return;
+    try{
+      const r=await api("/api/clean",{ids,hard:S.hard,dryRun:true}); S.dry={};
+      r.results.forEach(x=>{S.dry[x.id]=x.ok?x.summary:"Cannot clean this: "+x.errors.join("; ");});
+      $$("[data-act]").forEach(el=>{el.textContent=S.dry[el.dataset.act]||"";});
+    }catch(e){}
+  },120);
+}
+async function runClean(){
+  if(S.running||!S.batch.length)return;
+  S.running=true;
+  const items=S.batch.slice().sort((a,b)=>ORDER[a.safety]-ORDER[b.safety]||b.bytes-a.bytes);
+  const startFree=D.disk.free; let trashed=0, failed=0, done=0;
+  showRun("none"); $("#hard").disabled=true; $("#sheet-close").disabled=true; $$("#planlist [data-unpick]").forEach(b=>{b.hidden=true;});
+  const st=(id,cls,txt)=>{ $$("[data-st]").forEach(el=>{ if(el.dataset.st===id){el.className="st "+cls;el.textContent=txt;} }); };
+  for(const it of items){
+    st(it.id,"work","Working…");
+    let r; try{ r=(await api("/api/clean",{ids:[it.id],hard:S.hard})).results[0]; }catch(e){ r={ok:false,errors:[e.message||String(e)]}; }
+    if(r.free!=null)D.disk.free=r.free;
+    trashed+=r.trashed||0;
+    if(r.ok){ done++; CLEARED.add(it.id); plan.delete(it.id); C.delete(it.id); st(it.id,"ok",(r.trashed?"Moved to the Trash":"Cleaned")+(r.freed>MB?" · "+fmt(r.freed)+" back":"")); }
+    else{ failed++; st(it.id,"fail","Not finished: "+((r.errors||[]).join("; ")||"unknown reason")); }
+    renderDisk();
+  }
+  await new Promise(r=>setTimeout(r,1200));
+  try{ D.disk.free=(await api("/api/status")).free; }catch(e){}
+  S.running=false; $("#sheet-close").disabled=false; computeX(); saveState();
+  $("#run-done").innerHTML=`<p><strong>${done} of ${items.length} cleaned.</strong> Free space went from ${fmt(startFree)} to <strong>${fmt(D.disk.free)}</strong>.</p>
+    ${trashed?`<p>${plural(trashed,"item")} went to the Trash and still take up space until it is emptied.</p>`:""}
+    ${failed?`<p>${plural(failed,"item")} could not be finished. The reason is shown on each one above.</p>`:""}
+    <div class="sheet-row"><span class="acts">${trashed?'<button class="btn" type="button" data-after="trash">Empty the Trash</button>':""}<button class="btn" type="button" data-after="rescan">Scan again</button></span><button class="btn primary" type="button" data-after="close">Done</button></div>`;
+  showRun("done"); renderDisk(); syncPlan();
+}
+
+/* ---------- small components ---------- */
+function bars(items,max){
+  max=max||Math.max(...items.map(i=>i.bytes),1);
+  return '<ul class="bars">'+items.map(i=>`<li${i.zoom?` data-zoom="${esc(i.zoom)}" tabindex="0" role="link"`:""} data-tip="${esc("<b>"+esc(i.name)+"</b><br>"+fmt(i.bytes)+(i.note?"<br>"+esc(i.note):""))}"><span class="b-name">${esc(i.name)}</span><span class="b-track"><i style="width:${pct(i.bytes,max).toFixed(2)}%"></i></span><span class="b-val num">${fmt(i.bytes)}</span></li>`).join("")+"</ul>";
+}
+function row(o){
+  const cl=CLEARED.has(o.id), quick=LOCAL&&!cl&&C.has(o.id)?`<br><button class="rowclean" type="button" data-clean="${esc(o.id)}" aria-label="Clean ${esc(o.title)} now">Clean</button>`:"";
+  return `<li class="row${cl?" cleared":""}">${pickBox(o.id,o.title)}<div><div class="row-title"><label for="${hashId(S.view+o.id)}">${esc(o.title)}</label>${cl?pill("safe","Cleaned"):(o.pills||"")}</div>${o.why?`<div class="row-why">${esc(o.why)}</div>`:""}${o.path?`<div class="row-path mono">${esc(o.path)}</div>`:""}${o.cmd?`<div class="row-cmd mono">${esc(o.cmd)}</div>`:""}${o.extra||""}</div><div class="row-size num">${fmt(o.bytes)}${o.meta?`<small>${esc(o.meta)}</small>`:""}${o.max?`<span class="meter"><i style="width:${pct(o.bytes,o.max).toFixed(1)}%"></i></span>`:""}${quick}</div></li>`;
+}
+const head=(t,sub,right)=>`<div class="panel-head"><div><h2>${esc(t)}</h2>${sub?`<p class="sub">${sub}</p>`:""}</div>${right||""}</div>`;
+const live=ids=>ids.filter(id=>C.has(id));
+function bulk(key,ids,label){
+  ids=live(ids); BULK[key]=ids; if(!ids.length)return "";
+  return `<span class="acts"><button class="btn" type="button" data-bulk="${key}">Select ${esc(label)}</button>${LOCAL?`<button class="btn primary" type="button" data-cleanall="${key}">Clean ${esc(label)}</button>`:""}</span>`;
+}
+const chips=(name,opts,cur)=>'<div class="chips">'+opts.map(([v,l])=>`<button type="button" class="chip" data-chip="${name}" data-v="${esc(v)}" aria-pressed="${v===cur}">${esc(l)}</button>`).join("")+"</div>";
+const none=t=>`<li class="row"><span></span><div class="row-why">${esc(t)}</div><span></span></li>`;
+
+/* ---------- views ---------- */
+function vOverview(){
+  const d=D.disk,x=D.x, freePct=pct(d.free,d.total);
+  const state=freePct<3?["crit","Critically full"]:freePct<10?["review","Running tight"]:["safe","Healthy"];
+  const segs=[["safe","Safe to clear",x.safe],["review","Worth reviewing",x.review],["files","Everything else scanned",x.files],["system","System and unreadable",x.system],["free","Free",d.free]];
+  for(let i=segs.length-1;i>=0;i--)if(segs[i][0]!=="free"&&segs[i][2]<100*MB)segs.splice(i,1);
+  // level meter: each tick is an equal slice of the disk, coloured by what fills it
+  const N=innerWidth<620?40:72, ticks=[]; let acc=0;
+  segs.forEach(s=>{ const a=Math.round(acc/d.total*N); acc+=s[2]; const z=s[0]==="free"?N:Math.round(acc/d.total*N); for(let i=a;i<z;i++)ticks[i]=s; });
+  const fallback=segs.length>1?segs[segs.length-2]:segs[0];
+  const level=Array.from({length:N},(_,i)=>{const t=ticks[i]||fallback;return `<i class="${t[0]}" data-tip="${esc("<b>"+t[1]+"</b><br>"+fmt(t[2])+" · "+pct(t[2],d.total).toFixed(1)+"% of the disk")}"></i>`;}).join("");
+  const leg=segs.map(([k,l,b])=>`<li><span class="sw ${k}"></span>${esc(l)} <b>${fmt(b)}</b></li>`).join("");
+  const safe=safeItems(), safeTotal=totalOf(safe);
+
+  const wins=[];
+  D.rules.filter(r=>r.safety!=="keep").forEach(r=>wins.push({id:r.pickable?"rule:"+r.id:"x:"+r.id,title:r.title,bytes:r.bytes,pills:pill(r.safety),path:r.paths.length===1?r.paths[0]:"",why:r.why}));
+  if(x.staleFound.length){const b=x.staleFound.reduce((t,f)=>t+f.bytes,0);wins.push({id:"x:stale",title:"Build folders in idle projects",bytes:b,pills:pill("safe"),why:x.staleFound.length+" folders such as node_modules in projects untouched for 90 days or more.",extra:'<div><a class="linkbtn" href="#projects">Open Projects</a></div>'});}
+  wins.sort((a,b)=>b.bytes-a.bytes);
+  const top=wins.slice(0,8), wmax=top.length?top[0].bytes:1;
+
+  const base=HOMEN||D.tree;
+  let places=(base.c||[]).map(n=>({name:n.p,bytes:n.s,zoom:n.p,note:"Open in the disk map"}));
+  if(HOMEN)(D.tree.c||[]).forEach(n=>{ if(n.n!=="Users")places.push({name:n.p,bytes:n.s,zoom:n.p,note:"Open in the disk map"}); });
+  places=places.sort((a,b)=>b.bytes-a.bytes).slice(0,10);
+  const kinds=D.kinds.slice(0,10).map(k=>({name:k.kind,bytes:k.bytes,note:k.files.toLocaleString()+" files"}));
+
+  const notes=[];
+  notes.push(`<li><b>${D.stats.files.toLocaleString()} files</b> in ${D.stats.dirs.toLocaleString()} folders were measured in ${Math.round(D.seconds)} seconds. Scanning changes nothing.</li>`);
+  if(d.scanned>x.used+GB)notes.push(`<li><b>Folders add up to ${fmt(d.scanned)}, more than the ${fmt(x.used)} in use.</b> Cloned files are counted once per copy; package-manager environments and browser update clones are the usual cause. Deleting a clone returns less than its listed size.</li>`);
+  const git=(D.tagTotals||{}).git; if(git&&git.bytes>5*GB)notes.push(`<li><b>Git history takes ${fmt(git.bytes)}</b> across ${git.count.toLocaleString()} repositories. The largest are listed under <a class="linkbtn" href="#projects">Projects</a>; <code>git gc --aggressive</code> shrinks one without losing anything.</li>`);
+  if(x.system>GB)notes.push(`<li><b>${fmt(x.system)}</b> sits outside what the scan can see: the sealed macOS volume, local snapshots, and folders macOS protects.</li>`);
+  if(D.denied&&D.denied.length){const hd=D.denied.filter(p=>p.startsWith("~")).slice(0,6);notes.push(`<li><b>${(D.deniedCount||D.denied.length).toLocaleString()} folders could not be opened.</b> ${hd.length?"Among them "+hd.map(p=>"<code>"+esc(p)+"</code>").join(", ")+". ":""}Give Headroom Full Disk Access in System Settings › Privacy &amp; Security to include them.</li>`);}
+  if(d.snapshots)notes.push(`<li><b>${plural(d.snapshots,"local Time Machine snapshot")}.</b> macOS thins them when space runs low. To force it: <code>tmutil thinlocalsnapshots / 999999999999 4</code></li>`);
+  if(D.stats.dataless)notes.push(`<li><b>${D.stats.dataless.toLocaleString()} cloud-only folders</b> were skipped. They live in iCloud or Drive and use no local space.</li>`);
+
+  return `<section class="panel hero">
+    <div class="hero-top">
+      <div><p class="eyebrow">Macintosh HD · ${esc(D.os)}</p>
+        <h1><b class="num">${fmt(d.free)}</b> free of ${fmt(d.total)} ${pill(state[0],state[1])}</h1>
+        <p class="lede">${freePct<10?"macOS wants 10 to 20 GB spare for updates, swap and indexing. ":""}${safe.length?`Clearing the safe list could leave up to <strong>${fmt(d.free+safeTotal)}</strong> free.`:"Nothing on the safe list right now."}</p></div>
+      ${safe.length?`<div class="cta"><button class="btn primary big" type="button" data-cleansafe="1">${LOCAL?"Clean safe items":"Review safe items"}<small class="num">${fmt(safeTotal)} in ${plural(safe.length,"place")}</small></button><p>Caches and build folders that rebuild themselves. You confirm before anything goes.</p></div>`:""}
+    </div>
+    <div class="level" role="img" aria-label="How full the disk is, by what fills it">${level}</div>
+    <div class="zone" aria-hidden="true"><span></span><span>last 10%</span></div>
+    <ul class="legend">${leg}</ul>
+  </section>
+  <section class="grid2">
+    <div class="panel">${head("Biggest wins",LOCAL?"Clean one now, or tick several and clean them together.":"Tick rows to build a cleanup script.",'<a class="btn" href="#cleanup">See all</a>')}<ul class="rows">${top.map(w=>row(Object.assign({max:wmax},w))).join("")}</ul></div>
+    <div class="col">
+      <div class="panel">${head("Where the space is","Largest folders. Select one to open it in the map.")}${bars(places)}</div>
+      <div class="panel">${head("By kind of file")}${bars(kinds)}</div>
+    </div>
+  </section>
+  <section class="panel">${head("Notes from the scan")}<ul class="notes">${notes.join("")}</ul></section>`;
+}
+
+function vCleanup(){
+  const present=[...new Set(D.rules.map(r=>r.group))];
+  const list=D.rules.filter(r=>S.group==="all"||r.group===S.group);
+  const max=Math.max(...D.rules.map(r=>r.bytes),1);
+  const sec=(k,sub)=>{
+    const rs=list.filter(r=>r.safety===k); if(!rs.length)return "";
+    const ids=rs.filter(r=>r.pickable).map(r=>"rule:"+r.id);
+    const total=rs.filter(r=>!CLEARED.has("rule:"+r.id)).reduce((t,r)=>t+r.bytes,0);
+    return `<section class="panel">${head(SAFETY[k]+" · "+fmt(total),sub,k==="keep"?"":bulk("rules-"+k,ids,"all"))}<ul class="rows">${rs.map(r=>{
+      const manual=!r.pickable, view=r.cmd&&r.cmd.startsWith("@view:");
+      return row({id:"rule:"+r.id,title:r.title,pills:pill(r.safety)+`<span class="pill keep">${esc(GROUPS[r.group]||r.group)}</span>`,why:r.why,
+        path:r.paths.length===1?r.paths[0]:(r.paths.length?r.paths.length+" folders":""),cmd:r.pickable&&r.cmd?"$ "+r.cmd:"",bytes:r.bytes,max,
+        extra:view?`<div><a class="linkbtn" href="#downloaded">Open the Downloads view</a></div>`:((manual&&k!=="keep"?'<div class="row-why">Handled by hand or inside the app that owns it.</div>':"")+(r.paths.length===1&&NODES.has(r.paths[0])&&(NODES.get(r.paths[0]).c||[]).length?`<div><button class="linkbtn" type="button" data-zoom="${esc(r.paths[0])}">Open in the disk map</button></div>`:""))});
+    }).join("")}</ul></section>`;
+  };
+  return `<section class="panel">${head("Clean up","Known places where space piles up on a Mac, measured on this disk and sorted by size.")}
+    ${chips("group",[["all","All"]].concat(present.map(g=>[g,GROUPS[g]||g])),S.group)}</section>
+    ${sec("safe","Rebuilt automatically by the app or tool that owns them. Quit the app before clearing its cache.")}
+    ${sec("review","Yours to judge. Most of these download or rebuild again, at the cost of time and bandwidth.")}
+    ${sec("keep","Large, but personal or managed by macOS. Shown so you know where the space went.")}`;
+}
+
+/* squarified treemap */
+function squarify(items,x,y,w,h){
+  const total=items.reduce((t,i)=>t+i.v,0), out=[]; if(!total||w<=0||h<=0)return out;
+  const k=w*h/total; let rect={x,y,w,h}, rowItems=[];
+  const worst=(r,side)=>{let s=0,mx=0,mn=Infinity;for(const i of r){s+=i.a;if(i.a>mx)mx=i.a;if(i.a<mn)mn=i.a;}return Math.max(side*side*mx/(s*s),s*s/(side*side*mn));};
+  const flush=()=>{
+    const s=rowItems.reduce((t,i)=>t+i.a,0);
+    if(rect.w>=rect.h){const cw=s/rect.h;let cy=rect.y;for(const i of rowItems){const ch=i.a/cw;out.push({it:i.it,x:rect.x,y:cy,w:cw,h:ch});cy+=ch;}rect={x:rect.x+cw,y:rect.y,w:rect.w-cw,h:rect.h};}
+    else{const ch=s/rect.w;let cx=rect.x;for(const i of rowItems){const cw=i.a/ch;out.push({it:i.it,x:cx,y:rect.y,w:cw,h:ch});cx+=cw;}rect={x:rect.x,y:rect.y+ch,w:rect.w,h:rect.h-ch};}
+    rowItems=[];
+  };
+  for(const it of items){
+    const cell={it,a:it.v*k}, side=Math.min(rect.w,rect.h);
+    if(rowItems.length&&worst(rowItems.concat([cell]),side)>worst(rowItems,side))flush();
+    rowItems.push(cell);
+  }
+  if(rowItems.length)flush();
+  return out;
+}
+function mapParts(node,area){
+  const kids=(node.c||[]), tot=node.s||1, min=tot*40/Math.max(area,1);
+  let rest=node.s-kids.reduce((t,k)=>t+k.s,0); const parts=[];
+  kids.forEach((k,i)=>{ if(k.s>=min)parts.push({node:k,v:k.s,i}); else rest+=k.s; });
+  if(rest>=min&&parts.length)parts.push({rest:true,v:rest});
+  return parts.sort((a,b)=>b.v-a.v);
+}
+function drawMap(){
+  const box=$("#tm"); if(!box)return;
+  const W=box.clientWidth,H=box.clientHeight,node=S.mapNode; let html="";
+  const groups=mapParts(node,W*H);
+  const tipFor=(name,b,files,extra)=>esc("<b>"+esc(name)+"</b><br>"+fmt(b)+" · "+pct(b,node.s).toFixed(1)+"% of this view"+(files?"<br>"+files.toLocaleString()+" files":"")+(extra?"<br>"+extra:""));
+  if(!groups.length){box.innerHTML=`<div class="tm-t c1" style="inset:1px" data-tip="${tipFor(node.n,node.s,node.f)}"><span>${esc(node.n)}</span><span>${fmt(node.s)}</span></div>`;return;}
+  for(const g of squarify(groups,0,0,W,H)){
+    const it=g.it, slot=it.rest?0:(it.i<7?it.i+1:0), gn=it.rest?"Smaller items":it.node.n;
+    const hasKids=!it.rest&&it.node.c&&it.node.c.length, hdr=hasKids&&g.w>70&&g.h>52?20:0;
+    html+=`<div class="tm-g" style="left:${g.x.toFixed(1)}px;top:${g.y.toFixed(1)}px;width:${g.w.toFixed(1)}px;height:${g.h.toFixed(1)}px">`;
+    if(hdr)html+=`<div class="tm-h" data-zoom="${esc(it.node.p)}" data-tip="${tipFor(gn,it.v,it.node.f,"Select to open")}">${esc(gn)} <small class="num">${fmt(it.v)}</small></div>`;
+    const tiles=hasKids?squarify(mapParts(it.node,g.w*(g.h-hdr)),0,hdr,g.w,g.h-hdr):[];
+    if(!tiles.length){
+      const lab=g.w>86&&g.h>32;
+      html+=`<div class="tm-t c${slot}${it.rest?" rest":""}" style="left:1px;top:${hdr+1}px;width:${Math.max(g.w-2,1).toFixed(1)}px;height:${Math.max(g.h-hdr-2,1).toFixed(1)}px"${it.rest?"":` data-zoom="${esc(it.node.p)}"`} data-tip="${tipFor(gn,it.v,it.rest?0:it.node.f,it.rest?"Folders under the map's size cutoff":"")}">${lab?`<span>${esc(gn)}</span><span class="num">${fmt(it.v)}</span>`:""}</div>`;
+    }
+    for(const t of tiles){
+      const ti=t.it, tn=ti.rest?"Smaller items":ti.node.n, lab=t.w>86&&t.h>32;
+      const target=ti.rest?it.node.p:(ti.node.c&&ti.node.c.length?ti.node.p:it.node.p);
+      html+=`<div class="tm-t c${slot}${ti.rest?" rest":""}" style="left:${(t.x+1).toFixed(1)}px;top:${(t.y+1).toFixed(1)}px;width:${Math.max(t.w-2,1).toFixed(1)}px;height:${Math.max(t.h-2,1).toFixed(1)}px" data-zoom="${esc(target)}" data-tip="${tipFor(gn+" / "+tn,ti.v,ti.rest?0:ti.node.f)}">${lab?`<span>${esc(tn)}</span><span class="num">${fmt(ti.v)}</span>`:""}</div>`;
+    }
+    html+="</div>";
+  }
+  box.innerHTML=html;
+}
+function vMap(){
+  const node=S.mapNode, chain=[]; for(let n=node;n;n=n.par)chain.unshift(n);
+  const crumbs=chain.map((n,i)=>i===chain.length-1?`<strong>${esc(n.n)}</strong>`:`<button type="button" data-zoom="${esc(n.p)}">${esc(n.n)}</button><span>/</span>`).join("");
+  const kids=(node.c||[]), rest=node.s-kids.reduce((t,k)=>t+k.s,0), max=kids.length?kids[0].s:1;
+  const rows=kids.map((k,i)=>{
+    const slot=i<7?i+1:0, open=k.c&&k.c.length, id="file:"+k.p, cl=CLEARED.has(id);
+    return `<li class="row${cl?" cleared":""}">${pickBox(id,k.n)}<div><div class="row-title"><span class="sw c${slot}"></span>${open?`<button class="linkbtn" type="button" data-zoom="${esc(k.p)}">${esc(k.n)}</button>`:esc(k.n)}${cl?pill("safe","Cleaned"):(k.t&&TAGS[k.t]?`<span class="pill keep">${esc(TAGS[k.t].label)}</span>`:"")}</div><div class="row-path mono">${esc(k.p)}</div></div><div class="row-size num">${fmt(k.s)}<small>${pct(k.s,node.s).toFixed(1)}%${k.f?" · "+k.f.toLocaleString()+" files":""}</small><span class="meter"><i style="width:${pct(k.s,max).toFixed(1)}%"></i></span>${LOCAL&&!cl&&C.has(id)?`<br><button class="rowclean" type="button" data-clean="${esc(id)}">Clean</button>`:""}</div></li>`;
+  }).join("");
+  return `<section class="panel">${head("Disk map","Area is size. Each colour is one folder at this level; select a block to step inside.",node.par?`<button class="btn" type="button" data-zoom="${esc(node.par.p)}">Up one level</button>`:"")}
+    <div class="crumbs">${crumbs}</div><div class="tm" id="tm"></div></section>
+    <section class="panel">${head("Inside "+node.n,fmt(node.s)+(node.f?" in "+node.f.toLocaleString()+" files":""))}
+    <ul class="rows">${rows||none("Nothing larger than the map cutoff in here.")}${rest>MB&&kids.length?`<li class="row"><span class="nopick"></span><div><div class="row-title"><span class="sw c0"></span>Smaller items</div><div class="row-why">Files and folders under the map's size cutoff.</div></div><div class="row-size num">${fmt(rest)}<small>${pct(rest,node.s).toFixed(1)}%</small></div></li>`:""}</ul></section>`;
+}
+
+function filesList(){
+  const q=S.q.trim().toLowerCase();
+  const all=(D.bigFiles||[]).filter(f=>(S.kind==="all"||f.kind===S.kind)&&(!q||f.path.toLowerCase().includes(q)));
+  const max=all.length?all[0].bytes:1, shown=all.slice(0,S.filesShown);
+  return `<ul class="rows">${shown.map(f=>row({id:"file:"+f.path,title:baseName(f.path),path:dirName(f.path),bytes:f.bytes,meta:"changed "+age(f.mtime),pills:`<span class="pill keep">${esc(f.kind)}</span>`,max})).join("")||none("No files match.")}</ul>
+    ${all.length>shown.length?`<p><button class="btn" type="button" data-more="1">Show ${Math.min(120,all.length-shown.length)} more of ${all.length.toLocaleString()}</button></p>`:""}`;
+}
+function vFiles(){
+  const kinds=[...new Set((D.bigFiles||[]).map(f=>f.kind))];
+  const dupes=(D.dupes||[]), dsum=dupes.reduce((t,g)=>t+g.bytes*(g.files.length-1),0);
+  const extra=[]; dupes.forEach(g=>g.files.slice(1).forEach(f=>extra.push("file:"+f.path)));
+  return `<section class="panel">${head("Large files","The biggest single files on the disk. Files inside apps and package folders are left out.")}
+    <div class="tools"><input class="search" id="file-q" type="search" placeholder="Filter by name or folder" value="${esc(S.q)}" aria-label="Filter files">${chips("kind",[["all","All kinds"]].concat(kinds.map(k=>[k,k])),S.kind)}</div>
+    <div id="files-list">${filesList()}</div></section>
+    ${dupes.length?`<section class="panel">${head("Duplicates · "+fmt(dsum),"Files of 50 MB or more in your own folders with identical size and matching content samples. The oldest copy is listed first; the rest are candidates. Copies made in Finder can be APFS clones that already share space.",bulk("dupes",extra,"newer copies"))}
+    <ul class="rows">${dupes.map(g=>`<li class="row"><span class="nopick"></span><div><div class="row-title">${esc(baseName(g.files[0].path))} <span class="pill keep">${g.files.length} copies</span></div>${g.files.map((f,i)=>`<div class="row-path mono" style="display:flex;gap:8px;align-items:flex-start;margin-top:4px">${i?pickBox("file:"+f.path,f.path):'<span class="nopick" title="Oldest copy">•</span>'}<span>${esc(f.path)} · ${age(f.mtime)}</span></div>`).join("")}</div><div class="row-size num">${fmt(g.bytes)}<small>each</small></div></li>`).join("")}</ul></section>`:""}`;
+}
+
+function vProjects(){
+  const all=D.found||[], tags=[...new Set(all.map(f=>f.tag))];
+  const list=all.filter(f=>S.tag==="all"||f.tag===S.tag), max=list.length?list[0].bytes:1;
+  const stale=all.filter(f=>f.safety==="safe").map(f=>"file:"+f.path);
+  return `<section class="panel">${head("Projects","Dependency and build folders inside your own projects. Idle means nothing in the project changed for 90 days.",bulk("stale",stale,"idle rebuildables"))}
+    <div class="tools">${chips("tag",[["all","All"]].concat(tags.map(t=>[t,(TAGS[t]||{label:t}).label])),S.tag)}</div>
+    <ul class="rows">${list.slice(0,300).map(f=>{const t=TAGS[f.tag]||{label:f.tag,how:""};
+      return row({id:"file:"+f.path,title:f.project,pills:`<span class="pill keep">${esc(t.label)}</span>`+(f.tag==="git"?"":pill(f.safety,f.safety==="safe"?"Idle, rebuildable":f.stale?"Idle":"Active")),why:t.how,path:f.path,bytes:f.bytes,meta:"project touched "+age(f.projectMtime),max});}).join("")||none("No project leftovers above 20 MB were found.")}</ul></section>`;
+}
+
+function vDownloaded(){
+  const dl=D.downloads;
+  if(!dl)return `<section class="panel">${head("Downloads")}<p class="empty">macOS did not let Headroom read ~/Downloads. Allow access to the Downloads folder in System Settings, then scan again.</p></section>`;
+  const max=dl.length?dl[0].bytes:1, old=dl.filter(f=>days(f.mtime)>365), inst=dl.filter(f=>/\.(dmg|pkg|iso|ipsw)$/i.test(f.name));
+  return `<section class="panel">${head("Downloads","Items of 5 MB or more in ~/Downloads, largest first.",`<span class="acts">${bulk("dl-inst",inst.map(f=>"file:"+f.path),"installers")}${bulk("dl-old",old.map(f=>"file:"+f.path),"older than a year")}</span>`)}
+    <ul class="rows">${dl.map(f=>row({id:"file:"+f.path,title:f.name,bytes:f.bytes,meta:"changed "+age(f.mtime),pills:(f.dir?'<span class="pill keep">Folder</span>':"")+(/\.(dmg|pkg|iso|ipsw)$/i.test(f.name)?pill("safe","Installer"):""),max})).join("")||none("Nothing of 5 MB or more in Downloads.")}</ul></section>`;
+}
+
+function vApps(){
+  const apps=(D.apps||[]).filter(a=>a.bytes), max=apps.length?apps[0].bytes:1, known=apps.some(a=>a.lastUsed);
+  return `<section class="panel">${head("Applications",(known?"Size on disk and the last time macOS recorded each app being opened.":"Size on disk. Last-opened dates are missing because Spotlight has no index on this disk.")+" Removing an app here leaves its support files behind; check the disk map under ~/Library for those.")}
+    <ul class="rows">${apps.map(a=>{const d=days(a.lastUsed);
+      return row({id:"file:"+a.path,title:a.name,path:a.path,bytes:a.bytes,meta:a.lastUsed?"opened "+age(a.lastUsed):(known?"no open recorded":""),pills:d>180&&a.lastUsed?pill("review","Unused 6+ months"):"",max});}).join("")}</ul></section>`;
+}
+
+function vScanning(){
+  const N=innerWidth<620?40:72;
+  return `<section class="panel scan"><p class="eyebrow">Scanning Macintosh HD</p><h1>Measuring every folder</h1>
+    <div class="level sweep" aria-hidden="true">${Array.from({length:N},(_,i)=>`<i style="animation-delay:${(i*2.4/N).toFixed(2)}s"></i>`).join("")}</div>
+    <p class="count num" id="scan-progress" role="status">${esc(S.progress||"Starting")}</p>
+    <p class="sub">About three minutes on a full disk. Nothing is changed while scanning. macOS may ask whether Headroom can look inside Documents, Downloads or Desktop; allowing it gives a fuller picture.</p></section>`;
+}
+
+const VIEWS={
+  overview:["Overview",vOverview,'<path d="M2.5 11.5a5.5 5.5 0 1111 0"/><path d="M8 11.5l2.6-3.6"/>'],
+  cleanup:["Clean up",vCleanup,'<path d="M8 1.8v3M8 11.2v3M1.8 8h3M11.2 8h3M3.7 3.7l2 2M10.3 10.3l2 2M12.3 3.7l-2 2M5.7 10.3l-2 2"/>'],
+  map:["Disk map",vMap,'<rect x="2" y="2.5" width="7" height="11" rx="1"/><rect x="9" y="2.5" width="5" height="5" rx="1"/><rect x="9" y="7.5" width="5" height="6" rx="1"/>'],
+  files:["Large files",vFiles,'<path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/>'],
+  projects:["Projects",vProjects,'<path d="M2 4.5h4l1.5 1.5H14V13H2z"/>'],
+  downloaded:["Downloads",vDownloaded,'<path d="M8 2v8M4.5 7L8 10.5 11.5 7M3 13.5h10"/>'],
+  apps:["Applications",vApps,'<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>']
+};
+function renderDisk(){
+  const el=$("#disk");
+  if(!D){ el.innerHTML=`<div class="disk-free">${S.scanning?"Scanning…":"No scan yet"}</div>`; return; }
+  const d=D.disk, fp=pct(d.free,d.total), cls=fp<3?"crit":fp<10?"tight":"";
+  const when=new Date(D.scannedAt*1000).toLocaleString(undefined,{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
+  el.innerHTML=`<div class="disk-free num">${fmt(d.free)}<small>free of ${fmt(d.total)}</small></div>
+    <div class="disk-bar ${cls}" role="img" aria-label="${(100-fp).toFixed(1)}% used"><i style="width:${(100-fp).toFixed(2)}%"></i></div>
+    <div class="disk-meta">${S.scanning?"Scanning…":(LOCAL?"Scanned ":"Snapshot from ")+esc(when)}</div>
+    ${LOCAL?`<button class="btn" type="button" id="rescan"${S.scanning?" disabled":""}>Scan again</button>`:""}`;
+}
+function render(){
+  const b=D?{cleanup:fmt(D.x.safe),files:(D.bigFiles||[]).length.toLocaleString(),projects:(D.found||[]).length.toLocaleString(),downloaded:D.downloads?fmt(D.downloads.reduce((t,f)=>t+f.bytes,0)):"",apps:(D.apps||[]).length.toLocaleString()}:{};
+  $("#nav").innerHTML=Object.keys(VIEWS).map(v=>`<a href="#${v}"${v===S.view?' aria-current="page"':""}>${NAVI(VIEWS[v][2])}<span>${VIEWS[v][0]}</span>${b[v]?`<small>${esc(b[v])}</small>`:""}</a>`).join("");
+  renderDisk();
+  if(S.scanning){ $("#main").innerHTML=vScanning(); $("#planbar").hidden=true; return; }
+  if(!D)return;
+  $("#main").innerHTML=VIEWS[S.view][1]();
+  if(S.view==="map")drawMap();
+  syncPlan();
+}
+function go(){ const v=location.hash.slice(1); S.view=VIEWS[v]?v:"overview"; render(); window.scrollTo(0,0); }
+function zoom(p){ const n=NODES.get(p); if(!n)return; S.mapNode=n; if(S.view!=="map"){ if(location.hash==="#map")render(); else location.hash="#map"; } else render(); }
+
+/* ---------- scanning (app only) ---------- */
+async function startScan(){
+  if(S.scanning)return;
+  S.scanning=true; S.progress="Starting"; S.batch=[]; $("#sheet").hidden=true; render(); window.scrollTo(0,0);
+  try{ await api("/api/rescan",{}); }catch(e){ S.progress=e.message; }
+  pollScan();
+}
+function pollScan(){
+  const tick=async()=>{
+    let s; try{s=await api("/api/status");}catch(e){ setTimeout(tick,3000); return; }
+    if(s.scanning){ S.progress=s.progress||"Starting"; const el=$("#scan-progress"); if(el)el.textContent=S.progress; setTimeout(tick,1500); }
+    else if(s.scanError){ S.scanning=false; $("#main").innerHTML=`<div class="panel empty"><h2>The scan stopped</h2><p>${esc(s.scanError)}</p><p><button class="btn primary" type="button" id="rescan">Try again</button></p></div>`; }
+    else location.reload();
+  };
+  tick();
+}
+
+/* ---------- events ---------- */
+document.addEventListener("change",e=>{
+  const t=e.target;
+  if(t.dataset&&t.dataset.pick){ setPick(t.dataset.pick,t.checked); syncPlan(); }
+  if(t.id==="hard"){ S.hard=t.checked; renderSheet(); }
+});
+document.addEventListener("input",e=>{ if(e.target.id==="file-q"){ S.q=e.target.value; S.filesShown=120; $("#files-list").innerHTML=filesList(); syncPlan(); } });
+document.addEventListener("click",e=>{
+  const t=e.target.closest("[data-zoom],[data-bulk],[data-cleanall],[data-cleansafe],[data-clean],[data-chip],[data-more],[data-unpick],[data-after],#plan-open,#plan-clear,#sheet-close,#copy,#run-go,#run-cancel,#run-yes,#rescan,#sheet");
+  if(!t)return;
+  if(t.dataset.zoom){ zoom(t.dataset.zoom); }
+  else if(t.dataset.bulk){ const ids=live(BULK[t.dataset.bulk]||[]), allOn=ids.every(id=>plan.has(id)); ids.forEach(id=>setPick(id,!allOn)); syncPlan(); }
+  else if(t.dataset.cleanall){ openSheet(live(BULK[t.dataset.cleanall]||[]).map(id=>C.get(id))); }
+  else if(t.dataset.cleansafe){ openSheet(safeItems()); }
+  else if(t.dataset.clean){ openSheet([C.get(t.dataset.clean)]); }
+  else if(t.dataset.chip){ S[t.dataset.chip]=t.dataset.v; S.filesShown=120; render(); }
+  else if(t.dataset.more){ S.filesShown+=120; $("#files-list").innerHTML=filesList(); syncPlan(); }
+  else if(t.dataset.unpick){ const id=t.dataset.unpick; S.batch=S.batch.filter(it=>it.id!==id); setPick(id,false); syncPlan(); if(S.batch.length)renderSheet(); else closeSheet(); }
+  else if(t.dataset.after){
+    const a=t.dataset.after;
+    if(a==="close")closeSheet();
+    else if(a==="rescan")startScan();
+    else if(a==="trash"){
+      if(t.dataset.armed){
+        t.disabled=true; t.textContent="Emptying…";
+        api("/api/clean",{ids:["rule:trash"],hard:false}).then(r=>{ const x=r.results[0]; if(x.free!=null)D.disk.free=x.free; t.textContent=x.ok?"Trash emptied · "+fmt(D.disk.free)+" free":"Could not empty the Trash"; renderDisk(); }).catch(()=>{t.textContent="Could not empty the Trash";});
+      }else{ t.dataset.armed="1"; t.textContent="Empty for good?"; t.classList.add("danger"); }
+    }
+  }
+  else if(t.id==="plan-open"){ openSheet([...plan.values()]); }
+  else if(t.id==="plan-clear"){ plan.clear(); syncPlan(); }
+  else if(t.id==="sheet-close"||(t.id==="sheet"&&e.target===t)){ closeSheet(); }
+  else if(t.id==="run-go"){
+    $("#run-what").innerHTML=`<strong>Remove ${plural(S.batch.length,"item")}, about ${fmt(totalOf(S.batch))}?</strong> `+(S.hard?"Everything is deleted outright and cannot be brought back.":"Caches and commands cannot be undone. Anything sent to the Trash can be put back until you empty it.");
+    showRun("confirm"); $("#run-yes").focus();
+  }
+  else if(t.id==="run-cancel"){ showRun("idle"); }
+  else if(t.id==="run-yes"){ runClean(); }
+  else if(t.id==="rescan"){ startScan(); }
+  else if(t.id==="copy"){
+    const txt=$("#script").textContent, st=$("#copy-state");
+    const fail=()=>{ const r=document.createRange(); r.selectNodeContents($("#script")); const s=getSelection(); s.removeAllRanges(); s.addRange(r); st.textContent="Copying was blocked here. The script is selected; press Cmd-C."; };
+    try{ navigator.clipboard.writeText(txt).then(()=>{st.textContent="Copied. Read it once more in Terminal before pressing Return.";},fail); }catch(err){ fail(); }
+  }
+});
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"&&!$("#sheet").hidden)closeSheet();
+  if(e.key==="Enter"&&e.target.matches&&e.target.matches("li[data-zoom]"))zoom(e.target.dataset.zoom);
+});
+const tip=$("#tip");
+document.addEventListener("pointermove",e=>{
+  const t=e.target.closest&&e.target.closest("[data-tip]");
+  if(!t||e.pointerType==="touch"){tip.hidden=true;return;}
+  if(tip.dataset.for!==t.dataset.tip){tip.innerHTML=t.dataset.tip;tip.dataset.for=t.dataset.tip;}
+  tip.hidden=false;
+  const r=tip.getBoundingClientRect(); let x=e.clientX+14,y=e.clientY+16;
+  if(x+r.width>innerWidth-8)x=Math.max(8,e.clientX-r.width-10);
+  if(y+r.height>innerHeight-8)y=Math.max(8,e.clientY-r.height-12);
+  tip.style.left=x+"px"; tip.style.top=y+"px";
+});
+document.addEventListener("pointerleave",()=>{tip.hidden=true;});
+window.addEventListener("hashchange",go);
+let rz; window.addEventListener("resize",()=>{clearTimeout(rz);rz=setTimeout(()=>{if(D&&!S.scanning&&S.view==="map")drawMap();},120);});
+
+/* ---------- boot ---------- */
+if(!$('meta[name="viewport"]')){ const m=document.createElement("meta"); m.name="viewport"; m.content="width=device-width, initial-scale=1, viewport-fit=cover"; document.head.appendChild(m); }
+$("#plan-open").textContent=LOCAL?"Clean up…":"Review script";
+(async function boot(){
+  let s=null;
+  if(LOCAL){
+    try{s=await api("/api/status");}catch(e){}
+    if(s&&s.scanning){ S.scanning=true; S.progress=s.progress; render(); pollScan(); return; }
+  }
+  try{
+    const r=await fetch("scan.json",LOCAL?{headers:{"X-Headroom-Token":window.HEADROOM.token}}:{});
+    if(!r.ok)throw new Error(r.status);
+    D=await r.json();
+  }catch(e){
+    if(LOCAL){ startScan(); return; }
+    render(); $("#main").innerHTML='<div class="panel empty"><h2>No scan to show</h2><p>This page shows a snapshot made by the Headroom app. Open Headroom on your Mac to scan and clean.</p></div>';
+    return;
+  }
+  if(s&&s.free)D.disk.free=s.free;   // the app shows free space as it is now, not as it was at scan time
+  prepare(); loadState(); go();
+  if(LOCAL)setInterval(async()=>{   // keeps the app alive and the free-space figure honest
+    if(S.running||S.scanning)return;
+    try{ const s=await api("/api/status"); if(Math.abs(s.free-D.disk.free)>50*MB){ D.disk.free=s.free; computeX(); renderDisk(); if(S.view==="overview"&&$("#sheet").hidden)render(); } }catch(e){}
+  },20000);
+})();
+})();
+</script>

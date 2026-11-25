@@ -1,0 +1,14 @@
+# Scan results list this Mac's folder and file names. Never commit them.
+scan.json
+scan.json.tmp
+scan.backup.json
+headroom-actions.log
+
+# Build output
+dist/
+app/AppIcon.icns
+
+# Local tooling
+.claude/
+.DS_Store
+__pycache__/
