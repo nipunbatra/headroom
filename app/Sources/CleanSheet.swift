@@ -130,28 +130,25 @@ import SwiftUI
                 }
                 status(it)
                 if session.stage == .review, !it.supportOptions.isEmpty {
-                    DisclosureGroup("Choose support files (\(it.selectedSupport.count) of \(it.supportOptions.count))", isExpanded: Binding(
-                        get: { expandedApps.contains(it.id) },
-                        set: { if $0 { expandedApps.insert(it.id) } else { expandedApps.remove(it.id) } }
-                    )) {
+                    disclosureButton("Choose support files (\(it.selectedSupport.count) of \(it.supportOptions.count))",
+                                     id: it.id, expanded: $expandedApps)
+                    if expandedApps.contains(it.id) {
                         VStack(alignment: .leading, spacing: Space.s) {
                             Text("Unchecked files stay on your Mac. Support folders can contain documents, profiles, and settings.")
                                 .foregroundStyle(.secondary)
                             ForEach(it.supportOptions, id: \.path) { option in
                                 Toggle(isOn: Binding(get: { it.selectedSupport.contains(option.path) },
                                                      set: { model.selectSupport(option.path, for: it.id, include: $0) })) {
-                                    Text(option.path + " · " + fmt(option.returns)).textSelection(.enabled)
+                                    Text(option.path + " · " + fmt(option.returns))
                                 }
                                 .toggleStyle(.checkbox)
                             }
                         }.font(.callout).padding(.vertical, Space.xs)
-                    }.font(.callout)
+                    }
                 }
                 if session.stage == .review, let targets = session.previews[it.id], !targets.isEmpty {
-                    DisclosureGroup("Show " + plural(targets.count, "target"), isExpanded: Binding(
-                        get: { expandedTargets.contains(it.id) },
-                        set: { if $0 { expandedTargets.insert(it.id) } else { expandedTargets.remove(it.id) } }
-                    )) {
+                    disclosureButton(plural(targets.count, "target"), id: it.id, expanded: $expandedTargets)
+                    if expandedTargets.contains(it.id) {
                         ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
                             switch target.step {
                             case .run(let cmd): Text(cmd).textSelection(.enabled)
@@ -160,7 +157,6 @@ import SwiftUI
                         }
                         .font(.caption.monospaced())
                     }
-                    .font(.callout)
                 }
             }
             Spacer(minLength: Space.s)
@@ -177,6 +173,18 @@ import SwiftUI
             }
         }
         .padding(.vertical, 2)
+    }
+
+    private func disclosureButton(_ title: String, id: String, expanded: Binding<Set<String>>) -> some View {
+        let isOpen = expanded.wrappedValue.contains(id)
+        return Button {
+            if isOpen { expanded.wrappedValue.remove(id) } else { expanded.wrappedValue.insert(id) }
+        } label: {
+            Label(title, systemImage: isOpen ? "chevron.down" : "chevron.right")
+                .font(.callout)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityValue(isOpen ? "Expanded" : "Collapsed")
     }
 
     @ViewBuilder private func status(_ it: Candidate) -> some View {
