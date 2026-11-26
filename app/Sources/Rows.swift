@@ -33,6 +33,7 @@ struct Row: Identifiable {
     var loading = false
     var action: BulkAction?       // a button on a note row
     var link: Page?               // a button on a row that opens another page
+    var date: Double?             // when it last changed, for sorting
 }
 
 struct FlatRow: Identifiable {
@@ -56,6 +57,16 @@ struct RowSection: Identifiable {
 extension AppModel {
     func isCleared(_ row: Row) -> Bool { row.cleanID.map(cleared.contains) ?? false }
     func isCleanable(_ row: Row) -> Bool { row.cleanID.map { candidates[$0] != nil } ?? false }
+
+    /// Top-level rows in the order picked in the toolbar. Size is the default everywhere.
+    func ordered(_ rows: [Row]) -> [Row] {
+        switch sort {
+        case "newest": return rows.sorted { ($0.date ?? 0) > ($1.date ?? 0) }
+        case "oldest": return rows.sorted { ($0.date ?? .infinity) < ($1.date ?? .infinity) }
+        case "name": return rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        default: return rows
+        }
+    }
 
     func matches(_ row: Row) -> Bool {
         let q = search.trimmingCharacters(in: .whitespaces)
@@ -102,10 +113,10 @@ extension AppModel {
         if b.entries.isEmpty { return [textRow("empty", "This folder is empty.")] }
         var rows = b.entries.map { e -> Row in
             var r = Row(id: "file:" + e.path, cleanID: "file:" + e.path, title: e.name)
-            if e.dir { r.pills = [Pill(text: "Folder")] } else if e.link == true { r.pills = [Pill(text: "Alias")] }
+            if e.dir { r.pills = [Pill(text: "Folder")] } else if e.link { r.pills = [Pill(text: "Alias")] }
             r.bytes = e.returns
             r.disk = e.bytes
-            r.approx = e.partial ?? false
+            r.approx = e.partial
             r.meta = (e.dir && e.files != nil ? plural(e.files ?? 0, "file") + " · " : "") + "changed " + ageText(e.mtime, now: Date().timeIntervalSince1970)
             r.browse = e.dir ? e.path : nil
             r.reveal = e.path
@@ -297,11 +308,12 @@ extension AppModel {
             r.bytes = f.returns
             r.disk = f.bytes
             r.meta = "changed " + age(f.mtime)
+            r.date = f.mtime
             r.reveal = f.path
             return r
         }.filter(matches)
         var out = [RowSection(id: "files", title: "Large Files", subtitle: "The biggest single files on the disk. Files inside apps and package folders are left out.",
-                              rows: Array(files.prefix(300)), empty: "No files match.")]
+                              rows: Array(ordered(files).prefix(300)), empty: "No files match.")]
         let dupes = scan.dupes ?? []
         guard !dupes.isEmpty, kind == "all" else { return out }
         let wasted = dupes.reduce(Int64(0)) { $0 + $1.bytes * Int64($1.files.count - 1) }
@@ -354,13 +366,14 @@ extension AppModel {
             r.bytes = f.returns
             r.disk = f.bytes
             r.meta = "project touched " + age(f.projectMtime)
+            r.date = f.projectMtime
             r.reveal = f.path
             r.browse = f.tag == "git" ? nil : f.path
             return r
         }.filter(matches)
         return [RowSection(id: "projects", title: "Dependency and Build Folders",
                            subtitle: "Inside your own projects. Idle means nothing in the project changed for 90 days.",
-                           rows: Array(rows.prefix(300)),
+                           rows: Array(ordered(rows).prefix(300)),
                            bulk: idle.isEmpty ? [] : [BulkAction(id: "stale", label: "Add Idle Rebuildables", ids: idle, help: "Add rebuildable folders in idle projects to the cleanup list")],
                            empty: "No project leftovers above 20 MB were found.")]
     }
@@ -379,17 +392,19 @@ extension AppModel {
             r.bytes = f.returns
             r.disk = f.bytes
             r.meta = "changed " + age(f.mtime)
+            r.date = f.mtime
             r.browse = f.dir ? f.path : nil
             r.reveal = f.path
             return r
         }.filter(matches)
+        rows = ordered(rows)
         if search.isEmpty {
             var every = Row(id: "all-downloads", title: "Everything in Downloads")
             every.why = "The full listing, measured now, including items under 5 MB."
             every.path = "~/Downloads"
             every.browse = "~/Downloads"
             every.reveal = "~/Downloads"
-            every.bytes = nodes["~/Downloads"]?.s ?? 0
+            every.amount = fmt(nodes["~/Downloads"]?.s ?? 0)       // shown as a figure only, so it does not flatten the other rows' bars
             rows.append(every)
         }
         var bulk: [BulkAction] = []
@@ -414,6 +429,7 @@ extension AppModel {
                                                               : "with \(plural(left.count, "support item"))"
             if let used = a.lastUsed {
                 r.meta += (r.meta.isEmpty ? "" : " · ") + "opened " + age(used)
+                r.date = used
                 if days(used) > 180 { r.pills = [Pill(text: "Unused 6+ Months", kind: .review)] }
             }
             r.reveal = a.path
@@ -431,6 +447,6 @@ extension AppModel {
         }.filter(matches).sorted { $0.bytes > $1.bytes }
         return [RowSection(id: "apps", title: "Applications",
                            subtitle: "Cleaning an app also removes the support files it left in your Library, matched by the app's own identifier. Open a row to see them.",
-                           rows: rows, empty: "No apps match.")]
+                           rows: ordered(rows), empty: "No apps match.")]
     }
 }

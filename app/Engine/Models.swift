@@ -1,8 +1,9 @@
-// The shapes in scan.json and the helper's API answers. Sizes are bytes on disk;
-// `frees` is what deleting returns and is present only when it is smaller.
+// The shapes in scan.json. Sizes are bytes on disk; `frees` is what deleting returns and is
+// present only when it is smaller. The same file feeds the app and the read-only web snapshot.
 import Foundation
 
-struct Scan: Decodable {
+struct Scan: Codable {
+    var version = 2
     var scannedAt: Double
     var seconds: Double
     var os: String
@@ -11,6 +12,7 @@ struct Scan: Decodable {
     var stats: Stats
     var tree: Node
     var kinds: [KindTotal]
+    var exts: [ExtTotal]?
     var rules: [Rule]
     var found: [Found]?
     var tagTotals: [String: TagTotal]?
@@ -23,7 +25,7 @@ struct Scan: Decodable {
     var changes: Changes?
 }
 
-struct Disk: Decodable {
+struct Disk: Codable {
     var total: Int64
     var free: Int64
     var snapshots: Int?
@@ -31,50 +33,66 @@ struct Disk: Decodable {
     var unique: Int64?
 }
 
-struct Stats: Decodable {
+struct Stats: Codable {
     var files: Int
     var dirs: Int
     var dataless: Int?
 }
 
 /// One folder (or large file) in the disk map.
-final class Node: Decodable, Identifiable {
-    let n: String
-    let s: Int64
-    let f: Int?
-    let r: Int64?
-    let c: [Node]?
-    let t: String?
-    let k: String?
-    let h: Int?
+final class Node: Codable, Identifiable {
+    var n: String
+    var s: Int64
+    var f: Int?
+    var r: Int64?           // what deleting returns, when less than s
+    var c: [Node]?
+    var t: String?          // a tag such as node_modules
+    var k: String?          // "f" for a file
+    var h: Int?             // 1 on the home folder, whose name is replaced by ~
+    var o: Int?             // 1 when the contents are not shown (an app bundle, a tagged folder)
     var path = ""
     weak var parent: Node?
 
-    enum CodingKeys: String, CodingKey { case n, s, f, r, c, t, k, h }
+    enum CodingKeys: String, CodingKey { case n, s, f, r, c, t, k, h, o }
+
+    init(n: String, s: Int64, f: Int? = nil, r: Int64? = nil, k: String? = nil) {
+        self.n = n
+        self.s = s
+        self.f = f
+        self.r = r
+        self.k = k
+    }
+
     var id: String { path }
     var children: [Node] { c ?? [] }
     var returns: Int64 { r ?? s }
     var isFile: Bool { k == "f" }
 }
 
-struct KindTotal: Decodable, Identifiable {
+struct KindTotal: Codable, Identifiable {
     var kind: String
     var bytes: Int64
     var files: Int
     var id: String { kind }
 }
 
-struct TagTotal: Decodable {
+struct ExtTotal: Codable {
+    var ext: String
+    var bytes: Int64
+    var files: Int
+}
+
+struct TagTotal: Codable {
     var bytes: Int64
     var count: Int
 }
 
-struct Rest: Decodable {
+struct Rest: Codable {
     var count: Int
     var bytes: Int64
 }
 
-struct Rule: Decodable, Identifiable {
+struct Rule: Codable, Identifiable {
     var id: String
     var group: String
     var safety: String
@@ -94,9 +112,9 @@ struct Rule: Decodable, Identifiable {
     var cleanID: String { "rule:" + id }
 }
 
-struct RuleItem: Decodable {
+struct RuleItem: Codable {
     var id: String
-    var name: String
+    var name: String = ""
     var kind: String?
     var path: String?
     var bytes: Int64
@@ -109,7 +127,7 @@ struct RuleItem: Decodable {
     var returns: Int64 { frees ?? bytes }
 }
 
-struct Found: Decodable {
+struct Found: Codable {
     var tag: String
     var path: String
     var bytes: Int64
@@ -119,7 +137,7 @@ struct Found: Decodable {
     var returns: Int64 { frees ?? bytes }
 }
 
-struct BigFile: Decodable {
+struct BigFile: Codable {
     var path: String
     var bytes: Int64
     var mtime: Double
@@ -128,8 +146,8 @@ struct BigFile: Decodable {
     var returns: Int64 { frees ?? bytes }
 }
 
-struct DupeGroup: Decodable {
-    struct Copy: Decodable {
+struct DupeGroup: Codable {
+    struct Copy: Codable {
         var path: String
         var mtime: Double
     }
@@ -137,7 +155,7 @@ struct DupeGroup: Decodable {
     var files: [Copy]
 }
 
-struct Download: Decodable {
+struct Download: Codable {
     var name: String
     var bytes: Int64
     var mtime: Double
@@ -147,8 +165,8 @@ struct Download: Decodable {
     var path: String { "~/Downloads/" + name }
 }
 
-struct AppInfo: Decodable {
-    struct Leftover: Decodable {
+struct AppInfo: Codable {
+    struct Leftover: Codable {
         var path: String
         var bytes: Int64
         var frees: Int64?
@@ -165,8 +183,8 @@ struct AppInfo: Decodable {
     var leftoverBytes: Int64 { (leftovers ?? []).reduce(0) { $0 + $1.returns } }
 }
 
-struct Changes: Decodable {
-    struct Item: Decodable {
+struct Changes: Codable {
+    struct Item: Codable {
         var path: String
         var bytes: Int64
         var delta: Int64
@@ -178,41 +196,29 @@ struct Changes: Decodable {
     var items: [Item]
 }
 
-// MARK: - Helper API
+// MARK: - What the engine answers
 
-struct Status: Decodable {
-    var free: Int64
-    var total: Int64
-    var scanning: Bool
-    var progress: String
-    var scanError: String
-    var hasScan: Bool
-}
-
-struct CleanResult: Decodable {
+struct CleanResult {
     var id: String
-    var ok: Bool
-    var errors: [String]
-    var freed: Int64?
-    var trashed: Int?
-    var summary: String?
+    var ok = false
+    var errors: [String] = []
+    var freed: Int64 = 0
+    var trashed = 0
+    var summary = ""
     var free: Int64?
+    var output: String?
 }
 
-struct CleanResponse: Decodable {
-    var results: [CleanResult]
-}
-
-struct Listing: Decodable {
-    struct Entry: Decodable {
+struct Listing {
+    struct Entry {
         var name: String
         var path: String
-        var dir: Bool
-        var bytes: Int64
-        var mtime: Double
-        var link: Bool?
+        var dir = false
+        var bytes: Int64 = 0
+        var mtime: Double = 0
+        var link = false
         var files: Int?
-        var partial: Bool?
+        var partial = false
         var frees: Int64?
         var returns: Int64 { frees ?? bytes }
     }
@@ -221,15 +227,11 @@ struct Listing: Decodable {
     var rest: Rest?
 }
 
-struct Sample: Decodable, Identifiable {
+struct Sample: Codable, Identifiable {
     var t: Double
     var free: Int64
     var total: Int64?
     var scan: Int?
     var id: Double { t }
     var date: Date { Date(timeIntervalSince1970: t) }
-}
-
-struct History: Decodable {
-    var samples: [Sample]
 }

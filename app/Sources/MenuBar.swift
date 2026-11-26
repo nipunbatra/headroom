@@ -29,23 +29,21 @@ import SwiftUI
             MiniBar(fraction: 1 - model.freeFraction,
                     color: model.freeFraction < 0.03 ? Palette.crit.color : model.freeFraction < 0.10 ? Palette.review.color : .accentColor)
                 .frame(height: 6)
-            switch model.phase {
-            case .scanning:
+            if model.scanning {
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: model.scanFraction)
                     Text(model.progress).font(.callout).monospacedDigit().foregroundStyle(.secondary)
                 }
-            case .ready:
+            }
+            if model.scan != nil {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("\(fmt(model.totals.safe)) safe to clear", systemImage: "sparkles")
                     if model.purgeable > GB {
                         Label("\(fmt(model.purgeable)) more that macOS frees when needed", systemImage: "clock.arrow.circlepath")
                     }
-                    Text(model.scannedText).font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                    if !model.scanning { Text(model.scannedText).font(.caption).foregroundStyle(.secondary).padding(.top, 2) }
                 }
                 .font(.callout)
-            default:
-                EmptyView()
             }
             Divider()
             HStack(spacing: Space.s) {
@@ -54,9 +52,12 @@ import SwiftUI
                     model.reviewSafe()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.phase != .ready || model.safeItems.isEmpty)
-                Button("Scan Now") { model.rescan() }
-                    .disabled(model.phase != .ready)
+                .disabled(model.scan == nil || model.safeItems.isEmpty)
+                if model.scanning {
+                    Button("Stop Scan") { model.cancelScan() }
+                } else {
+                    Button("Scan Now") { model.rescan() }
+                }
                 Spacer()
             }
             HStack {
@@ -128,7 +129,7 @@ import SwiftUI
                 }
                 Section("Records") {
                     LabeledContent("Action log") {
-                        Button("Show in Finder") { model.reveal([model.engine.actionLogURL.path]) }
+                        Button("Show in Finder") { model.reveal([model.engine.actionLogPath]) }
                     }
                     Text("Every cleanup is written to this file: what was asked, what was done, and how much came back.")
                         .font(.callout).foregroundStyle(.secondary)

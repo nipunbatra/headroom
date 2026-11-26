@@ -69,7 +69,7 @@ struct Browse {
 }
 
 enum Phase: Equatable {
-    case starting, noPython, scanning, ready
+    case starting, ready
     case failed(String)
 }
 
@@ -142,7 +142,14 @@ struct TagInfo {
     var purgeable: Int64 = 0
     var progress = "Starting"
     var scanFraction: Double = 0
+    var scanning = false
+    var scanError: String?
+    var sort = "size"
+    var scanPath = ""
+    var scanRate = 0
+    var scanStarted = Date()
     var expectedFiles = 0
+    private var scanProgress: ScanProgress?
     var history: [Sample] = []
 
     var session: CleanSession?
@@ -167,46 +174,35 @@ struct TagInfo {
 
     // MARK: - Start up
 
+    private var started = false
+
     func start() async {
+        guard !started else { return }
+        started = true
         readVolume()
         checkAccess()
-        do {
-            try await engine.start()
-        } catch let e as EngineError where e.message == "python" {
-            phase = .noPython
-            return
-        } catch {
-            phase = .failed(error.localizedDescription)
-            return
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            Task { @MainActor in AppModel.shared.tick() }
         }
-        if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-                Task { @MainActor in AppModel.shared.tick() }
-            }
-        }
-        if let s = try? await engine.status(), s.scanning {
-            phase = .scanning
-            await pollScan()
-            return
-        }
-        load()
+        await load()
     }
 
-    func load() {
-        guard FileManager.default.fileExists(atPath: engine.scanURL.path) else {
+    func load() async {
+        guard engine.hasScan else {
             rescan()
             return
         }
-        do {
-            install(try engine.loadScan())
+        if let scan = await engine.loadScan() {
+            install(scan)
             phase = .ready
-            Task { if let h = try? await engine.history() { history = h } }
-        } catch {
+            history = await engine.history(free: free, total: total)
+        } else {
             phase = .failed("Unable to read the last scan. Scan again to replace it.")
         }
     }
 
     private func install(_ scan: Scan) {
+        let ticked = plan           // a fresh scan keeps the cleanup list, minus anything that is gone
         self.scan = scan
         now = scan.scannedAt
         nodes = [:]
@@ -263,13 +259,14 @@ struct TagInfo {
             add(Candidate(id: "file:" + p, title: n.n, bytes: n.returns, paths: [p], safety: "review"))
         }
         restoreState()
+        if plan.isEmpty { plan = ticked.filter { candidates[$0] != nil } }
         compute()
     }
 
     /// Must stay in step with user_path_ok() in scan.py, which checks again before deleting.
     static func pickable(_ p: String) -> Bool {
         if p.hasSuffix("/.git") || p.contains("/.git/") { return false }
-        if !p.hasPrefix("~/") { return p.range(of: #"^/Applications/[^/]+\.app$"#, options: .regularExpression) != nil }
+        if !p.hasPrefix("~/") { return p.range(of: #"^/Applications/[^/\n]+\.app\z"#, options: .regularExpression) != nil }
         let seg = p.split(separator: "/", omittingEmptySubsequences: false)
         if seg.count > 1, seg[1] == "Library" { return seg.count >= 4 }
         return seg.count >= 3
@@ -415,11 +412,12 @@ struct TagInfo {
         let ids = s.items.map(\.id)
         let hard = s.hard
         Task {
-            guard let results = try? await engine.dryRun(ids, hard: hard), session === s else { return }
+            let results = await engine.dryRun(ids, hard: hard, scan: scan)
+            guard session === s else { return }
             var dry: [String: String] = [:]
             var blocked: [String: String] = [:]
             for r in results {
-                if r.ok { dry[r.id] = r.summary ?? "" } else { blocked[r.id] = r.errors.joined(separator: "; ") }
+                if r.ok { dry[r.id] = r.summary } else { blocked[r.id] = r.errors.joined(separator: "; ") }
             }
             s.dry = dry
             s.blocked = blocked
@@ -453,22 +451,16 @@ struct TagInfo {
             if s.stopRequested { break }
             s.current = i
             s.marks[it.id] = .working
-            do {
-                let r = try await engine.clean(it.id, hard: s.hard)
-                if let f = r.free { free = f }
-                s.trashed += r.trashed ?? 0
-                if r.ok {
-                    s.done += 1
-                    let back = r.freed ?? 0
-                    s.marks[it.id] = .ok((r.trashed ?? 0) > 0 ? "Moved to the Trash" : back > MB ? "Cleaned, \(fmt(back)) back" : "Cleaned")
-                    markCleared(it)
-                } else {
-                    s.failed += 1
-                    s.marks[it.id] = .failed(r.errors.isEmpty ? "Not finished." : r.errors.joined(separator: "; "))
-                }
-            } catch {
+            let r = await engine.clean(it.id, hard: s.hard, scan: scan)
+            if let f = r.free { free = f }
+            s.trashed += r.trashed
+            if r.ok {
+                s.done += 1
+                s.marks[it.id] = .ok(r.trashed > 0 ? "Moved to the Trash" : r.freed > MB ? "Cleaned, \(fmt(r.freed)) back" : "Cleaned")
+                markCleared(it)
+            } else {
                 s.failed += 1
-                s.marks[it.id] = .failed(error.localizedDescription)
+                s.marks[it.id] = .failed(r.errors.isEmpty ? "Not finished." : r.errors.joined(separator: "; "))
             }
         }
         s.current = order.count
@@ -497,16 +489,12 @@ struct TagInfo {
     func emptyTrash() async {
         guard let s = session else { return }
         s.trash = .emptying
-        do {
-            let r = try await engine.clean("rule:trash", hard: false)
-            try? await Task.sleep(for: .seconds(1))
-            readVolume()
-            s.endFree = free
-            s.trash = r.ok ? .emptied(fmt(free)) : .failed
-            compute()
-        } catch {
-            s.trash = .failed
-        }
+        let r = await engine.clean("rule:trash", hard: false, scan: scan)
+        try? await Task.sleep(for: .seconds(1))
+        readVolume()
+        s.endFree = free
+        s.trash = r.ok ? .emptied(fmt(free)) : .failed
+        compute()
     }
 
     func closeSession() {
@@ -516,48 +504,57 @@ struct TagInfo {
 
     // MARK: - Scanning
 
+    /// Measures the disk again. The current scan stays on screen until the new one is ready.
     func rescan() {
-        guard phase != .scanning, phase != .starting, phase != .noPython else { return }
+        guard !scanning else { return }
         if let s = session, s.stage == .running { return }
-        session = nil
         expectedFiles = scan?.stats.files ?? 0
         progress = "Starting"
         scanFraction = 0
-        phase = .scanning
+        scanPath = ""
+        scanRate = 0
+        scanStarted = Date()
+        scanning = true
+        let p = ScanProgress()
+        scanProgress = p
         Task {
-            do {
-                _ = try await engine.rescan()
-                await pollScan()
-            } catch {
-                phase = .failed(error.localizedDescription)
+            let watcher = Task { @MainActor in          // the engine counts; this shows the count
+                var last = 0
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    let now = p.snapshot
+                    scanRate = (now.files - last) * 4
+                    last = now.files
+                    if !p.cancelled { progress = now.phase == "Measuring files" ? "Measured \(now.files.formatted()) files" : now.phase }
+                    if !now.path.isEmpty { scanPath = now.path }
+                    if now.phase != "Measuring files" {
+                        scanFraction = 0.97
+                    } else if expectedFiles > 0 {
+                        scanFraction = min(0.95, Double(now.files) / Double(expectedFiles) * 0.95)
+                    }
+                }
             }
+            do {
+                if let result = try await engine.scan(progress: p) {
+                    readVolume()
+                    install(result)
+                    phase = .ready
+                    history = await engine.history(free: free, total: total)
+                } else if scan == nil {
+                    phase = .failed("The scan was stopped before it finished.")
+                }
+            } catch {
+                if scan == nil { phase = .failed(error.localizedDescription) } else { scanError = error.localizedDescription }
+            }
+            watcher.cancel()
+            scanProgress = nil
+            scanning = false
         }
     }
 
-    private func pollScan() async {
-        while true {
-            try? await Task.sleep(for: .seconds(1.2))
-            guard let s = try? await engine.status() else { continue }
-            if s.scanning {
-                if s.progress.hasSuffix(" files") {
-                    let n = Int(s.progress.filter(\.isNumber)) ?? 0
-                    progress = "Measured \(n.formatted()) files"
-                    if expectedFiles > 0 { scanFraction = min(0.95, Double(n) / Double(expectedFiles) * 0.95) }
-                } else if s.progress.hasPrefix("Walk done") {
-                    progress = "Finding duplicates, leftovers and what changed"
-                    scanFraction = 0.97
-                } else {
-                    progress = "Starting"
-                }
-            } else if !s.scanError.isEmpty {
-                phase = .failed(s.scanError)
-                return
-            } else {
-                readVolume()
-                load()
-                return
-            }
-        }
+    func cancelScan() {
+        scanProgress?.cancel()
+        progress = "Stopping"
     }
 
     // MARK: - Looking inside folders
@@ -639,7 +636,7 @@ struct TagInfo {
             notifyLowSpace()
         }
         let every: Double? = ["daily": 86400.0, "weekly": 604800.0][d.string(forKey: "autoScan") ?? "never"]
-        if let every, phase == .ready, session == nil, let scan, Date().timeIntervalSince1970 - scan.scannedAt > every {
+        if let every, phase == .ready, !scanning, session == nil, let scan, Date().timeIntervalSince1970 - scan.scannedAt > every {
             rescan()
         }
     }

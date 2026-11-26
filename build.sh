@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds dist/Headroom.app: the native SwiftUI app plus the scanner, self-contained.
+# Builds dist/Headroom.app: the native SwiftUI app with its Swift scanner, self-contained.
 # Needs the Xcode Command Line Tools (swiftc). No Xcode project.
 #   ./build.sh            build dist/Headroom.app and dist/Headroom.zip (universal, optimised)
 #   ./build.sh --debug    quick build for this Mac only, no zip
@@ -10,7 +10,7 @@ APP=dist/Headroom.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 BIN="$APP/Contents/MacOS/Headroom"; T=$(mktemp -d)
-SRC=(app/Sources/*.swift)
+SRC=(app/Engine/*.swift app/Sources/*.swift)
 if [[ " $* " == *" --debug "* ]]; then
   swiftc -Onone -parse-as-library -target "$(uname -m)-apple-macos14.0" -o "$BIN" $SRC
 else
@@ -23,7 +23,6 @@ else
   fi
 fi
 cp app/Info.plist "$APP/Contents/Info.plist"
-cp scan.py index.html "$APP/Contents/Resources/"
 if [[ ! -f app/AppIcon.icns ]]; then
   TMP=$(mktemp -d); SET=$TMP/AppIcon.iconset; mkdir -p "$SET"
   swiftc -o "$TMP/make_icon" app/make_icon.swift -framework Cocoa

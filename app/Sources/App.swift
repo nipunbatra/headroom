@@ -1,12 +1,21 @@
 // Headroom: a native Mac window, menus and menu bar item around the bundled scanner.
 //   Headroom                              the app
-//   HEADROOM_OUT=<file> Headroom          keep scan.json somewhere else (tests)
+//   Headroom --scan [--root <folder>]     measure from a terminal and write scan.json, no window
+//   HEADROOM_OUT=<file> Headroom          keep scan.json and the logs in that file's folder (tests)
 //   HEADROOM_SNAPSHOT=<dir> Headroom      save a PNG of every page in light and dark, then quit
 //   HEADROOM_SELFTEST=<ids> Headroom      clean the given fixture ids through the real code path, then quit
 import AppKit
 import SwiftUI
 
 @main
+@MainActor
+enum Main {
+    static func main() {
+        if CommandLine.arguments.contains("--scan") { exit(CLI.scan(CommandLine.arguments)) }
+        HeadroomApp.main()
+    }
+}
+
 @MainActor
 struct HeadroomApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -57,7 +66,10 @@ struct HeadroomApp: App {
         let paths = model.highlighted.compactMap(\.reveal)
         Button("Scan Disk") { model.rescan() }
             .keyboardShortcut("r")
-            .disabled(model.phase == .scanning || model.phase == .starting)
+            .disabled(model.scanning)
+        Button("Stop Scan") { model.cancelScan() }
+            .keyboardShortcut(".")
+            .disabled(!model.scanning)
         Divider()
         Button("Show in Finder") { model.reveal(paths) }
             .keyboardShortcut("r", modifiers: [.command, .shift])
@@ -95,7 +107,7 @@ struct HeadroomApp: App {
         let ids = model.highlighted.compactMap(\.cleanID).filter { model.candidates[$0] != nil }
         Button("Clean Safe Items…") { model.reviewSafe() }
             .keyboardShortcut("k", modifiers: [.command, .shift])
-            .disabled(model.phase != .ready || model.safeItems.isEmpty)
+            .disabled(model.scan == nil || model.safeItems.isEmpty)
         Divider()
         Button(!ids.isEmpty && ids.allSatisfy(model.inPlan) ? "Remove from Cleanup List" : "Add to Cleanup List") { model.togglePlan(ids) }
             .keyboardShortcut("d")
@@ -110,7 +122,7 @@ struct HeadroomApp: App {
         Button("Clear Cleanup List") { model.clearPlan() }
             .disabled(model.plan.isEmpty)
         Divider()
-        Button("Show Action Log") { model.reveal([model.engine.actionLogURL.path]) }
+        Button("Show Action Log") { model.reveal([model.engine.actionLogPath]) }
     }
 }
 
@@ -137,10 +149,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         let d = UserDefaults.standard
         return !(d.bool(forKey: "menuBar") && d.bool(forKey: "keepRunning"))
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        AppModel.shared.engine.stop()
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -191,7 +199,7 @@ enum DevTools {
     static func snapshot(to dir: String, only: Set<String>?) async {
         let model = AppModel.shared
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        for _ in 0..<600 where model.phase != .ready { try? await Task.sleep(for: .seconds(0.5)) }
+        for _ in 0..<600 where model.scan == nil || model.scanning { try? await Task.sleep(for: .seconds(0.5)) }
         try? await Task.sleep(for: .seconds(1.5))
         func wanted(_ name: String) -> Bool { only?.contains(name) ?? true }
         for mode in ["light", "dark"] {
@@ -232,6 +240,16 @@ enum DevTools {
                 model.showInspector = false
                 try? await Task.sleep(for: .seconds(0.6))
             }
+        }
+        if only?.contains("scanning") == true {      // a rescan behind the current page, then stopped
+            NSApp.appearance = NSAppearance(named: .aqua)
+            model.go(.overview)
+            model.rescan()
+            try? await Task.sleep(for: .seconds(4))
+            capture("\(dir)/scanning.png")
+            model.cancelScan()
+            for _ in 0..<120 where model.scanning { try? await Task.sleep(for: .seconds(0.25)) }
+            log("SNAPSHOT scan stopped, still showing \(model.scan?.stats.files ?? 0) files from the earlier scan")
         }
         if wanted("extras") {
             for mode in ["light", "dark"] {

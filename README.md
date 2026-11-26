@@ -1,7 +1,11 @@
 # Headroom
 
 A native Mac app that shows what is filling your disk and clears it when you click.
-SwiftUI window, sidebar, toolbar, menus and a menu bar item; no Electron, no account, nothing leaves the Mac.
+All Swift: a SwiftUI window, sidebar, toolbar, menus and a menu bar item, with its own scanner.
+No Electron, no Python, no account, nothing leaves the Mac.
+
+A full scan of a 1 TB disk with 6.3 million files takes about 40 seconds, and the window stays
+usable while it runs.
 
 - **Overview**: free space, a level meter of what fills the disk, and one "Clean Safe Items…" button.
 - **Clean Up**: known places where space piles up (caches, package managers, simulators, model
@@ -27,7 +31,7 @@ Scanning is read-only. Nothing is removed until you press Clean and confirm.
 
 | Keys | Action |
 |---|---|
-| ⌘R | Scan the disk |
+| ⌘R | Scan the disk (⌘. stops it) |
 | ⌘1 … ⌘8 | Switch page |
 | ⇧⌘K | Clean safe items… |
 | ⌘D | Add the selected rows to the cleanup list |
@@ -40,8 +44,8 @@ Scanning is read-only. Nothing is removed until you press Clean and confirm.
 
 ## Install
 
-Needs macOS 14 or later, the Xcode Command Line Tools (`xcode-select --install`), and Python 3
-(the Command Line Tools include one; Homebrew's works too).
+Needs macOS 14 or later. Building needs the Xcode Command Line Tools (`xcode-select --install`);
+running the built app needs nothing else.
 
 ```bash
 git clone <this repo> headroom && cd headroom
@@ -82,19 +86,25 @@ Without it the Trash, Mail, Messages and Photos internals cannot be measured.
 ## Working on it
 
 ```bash
-python3 scan.py              # scan only, writes scan.json (read-only)
-python3 scan.py app          # the older web UI in your browser at http://127.0.0.1:8765
-./build.sh --debug           # quick build of the native app into dist/
+./test.sh                    # engine tests, then a cross-check against the old Python scanner
+./build.sh --debug           # quick build of the app into dist/
 ./build.sh --install         # optimised universal build, installed into /Applications
+dist/Headroom.app/Contents/MacOS/Headroom --scan    # scan from a terminal, no window
 ```
 
-`scan.py` is the scanner and a local helper that carries out cleanups, standard library only.
-`app/Sources/` is the native SwiftUI app, built with `swiftc` (no Xcode project). `index.html` is
-the earlier web interface, kept as a read-only snapshot viewer. `CLAUDE.md` describes the design
-and the safety rules that the pieces must keep in step. `scan.json` lists your folder and file
-names, so it is git-ignored; do not share it.
+- `app/Engine/` is the scanner and the cleaner: plain Swift, no UI. `Cleaner.swift` is the only
+  code that removes anything, and `Rules.swift` is the table of what may be cleaned and how.
+- `app/Sources/` is the SwiftUI app. Everything is built with `swiftc`; there is no Xcode project.
+- `app/Tests/` holds 39 tests (267 checks). They build a fake home folder under the temp
+  folder and check the path rules, every kind of clean id, clone and hard-link accounting, the
+  reports, and what changed between scans. Nothing in your real home is touched.
+- `scan.py` and `index.html` are the first version (a Python scanner and a web page). The app no
+  longer uses them. `scan.py` is kept so `test.sh` can check that both scanners agree on the same
+  fixture; `index.html` still opens a `scan.json` as a read-only snapshot.
+- `CLAUDE.md` describes the design and the safety rules. `scan.json` lists your folder and file
+  names, so it is git-ignored; do not share it.
 
-Two checks for anyone changing the app:
+Two more checks for anyone changing the app:
 
 ```bash
 HEADROOM_SNAPSHOT=/tmp/shots dist/Headroom.app/Contents/MacOS/Headroom   # a PNG of every page, light and dark

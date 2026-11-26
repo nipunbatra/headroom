@@ -21,6 +21,11 @@ import SwiftUI
             CleanSheet(session: session).environment(model)
         }
         .quickLookPreview($model.quickLook)
+        .alert("Unable to Finish the Scan", isPresented: Binding(get: { model.scanError != nil }, set: { if !$0 { model.scanError = nil } })) {
+            Button("OK") { model.scanError = nil }
+        } message: {
+            Text((model.scanError ?? "") + " The earlier figures are still shown.")
+        }
     }
 }
 
@@ -48,7 +53,7 @@ import SwiftUI
     }
 
     private func badge(_ page: Page) -> String? {
-        guard let scan = model.scan, model.phase == .ready else { return nil }
+        guard let scan = model.scan else { return nil }
         switch page {
         case .cleanup: return model.totals.safe > 0 ? fmt(model.totals.safe) : nil
         case .changes: return scan.changes.map { c in c.items.isEmpty ? nil : "\(c.items.count)" } ?? nil
@@ -69,7 +74,10 @@ import SwiftUI
             .font(.callout)
             MiniBar(fraction: 1 - model.freeFraction,
                     color: model.freeFraction < 0.03 ? Palette.crit.color : model.freeFraction < 0.10 ? Palette.review.color : .accentColor)
-            if model.phase == .ready {
+            if model.scanning {
+                ProgressView(value: model.scanFraction).controlSize(.small)
+                Text(model.progress).font(.caption).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+            } else if model.scan != nil {
                 Text(model.scannedText).font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -84,24 +92,20 @@ import SwiftUI
     var body: some View {
         @Bindable var model = model
         Group {
-            switch model.phase {
-            case .starting:
-                ProgressView("Starting Headroom").frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .noPython:
-                ContentUnavailableView("Python 3 Is Needed", systemImage: "exclamationmark.triangle",
-                                       description: Text("Headroom's scanner runs on Python 3. In Terminal, run xcode-select --install, then open Headroom again."))
-            case .scanning:
+            if model.scan != nil {
+                page
+            } else if model.scanning {
                 ScanningView()
-            case .failed(let message):
+            } else if case .failed(let message) = model.phase {
                 ContentUnavailableView {
-                    Label("The Scan Stopped", systemImage: "exclamationmark.triangle")
+                    Label("No Scan Yet", systemImage: "exclamationmark.triangle")
                 } description: {
                     Text(message)
                 } actions: {
-                    Button("Scan Again") { model.rescan() }
+                    Button("Scan Disk") { model.rescan() }
                 }
-            case .ready:
-                page
+            } else {
+                ProgressView("Opening the last scan").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .navigationTitle(model.page.title)
@@ -109,9 +113,13 @@ import SwiftUI
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 filter
-                Button("Scan", systemImage: "arrow.clockwise") { model.rescan() }
-                    .disabled(model.phase == .scanning || model.phase == .starting)
-                    .help("Measure the disk again (⌘R)")
+                if model.scanning {
+                    Button("Stop Scan", systemImage: "stop.circle") { model.cancelScan() }
+                        .help("Stop measuring and keep the current figures (⌘.)")
+                } else {
+                    Button("Scan", systemImage: "arrow.clockwise") { model.rescan() }
+                        .help("Measure the disk again; takes under a minute (⌘R)")
+                }
                 Button("Cleanup List", systemImage: "checklist") { model.showInspector.toggle() }
                     .help(model.showInspector ? "Hide the cleanup list (⌃⌘I)" : "Show the items ticked for cleaning (⌃⌘I)")
             }
@@ -139,7 +147,7 @@ import SwiftUI
 
     @ViewBuilder private var filter: some View {
         @Bindable var model = model
-        if model.phase == .ready {
+        if model.scan != nil {
             switch model.page {
             case .cleanup:
                 Picker("Category", selection: $model.group) {
@@ -153,26 +161,46 @@ import SwiftUI
                     ForEach(model.fileKinds, id: \.self) { Text($0).tag($0) }
                 }
                 .help("Show one kind of file")
+                sortPicker(dates: true)
             case .projects:
                 Picker("Folder Type", selection: $model.tag) {
                     Text("All Types").tag("all")
                     ForEach(model.projectTags, id: \.self) { Text(model.tagLabel($0)).tag($0) }
                 }
                 .help("Show one kind of project folder")
+                sortPicker(dates: true)
             case .map:
                 Button("Enclosing Folder", systemImage: "chevron.up") {
                     if let p = model.mapNode?.parent { model.zoom(p.path) }
                 }
                 .disabled(model.mapNode?.parent == nil)
                 .help("Go up one level in the map (⌘↑)")
+            case .downloads:
+                sortPicker(dates: true)
+            case .apps:
+                sortPicker(dates: false)
             default:
                 EmptyView()
             }
         }
     }
 
+    private func sortPicker(dates: Bool) -> some View {
+        @Bindable var model = model
+        return Picker("Sort", selection: $model.sort) {
+            Text("Largest First").tag("size")
+            if dates {
+                Text("Newest First").tag("newest")
+                Text("Oldest First").tag("oldest")
+            }
+            Text("By Name").tag("name")
+        }
+        .help("Change the order of the list")
+    }
+
     private var subtitle: String {
-        guard model.phase == .ready, let scan = model.scan else { return model.phase == .scanning ? "Scanning" : "" }
+        if model.scanning { return model.progress }
+        guard let scan = model.scan else { return "" }
         switch model.page {
         case .overview: return model.scannedText
         case .cleanup: return "\(fmt(model.totals.safe)) safe to clear"
@@ -210,14 +238,24 @@ import SwiftUI
             .accessibilityHidden(true)
             VStack(spacing: Space.s) {
                 Text("Measuring Every Folder").font(.title2).fontWeight(.semibold)
-                ProgressView(value: model.scanFraction).frame(width: 420)
-                Text(model.progress).monospacedDigit().foregroundStyle(.secondary)
+                if model.expectedFiles > 0 {
+                    ProgressView(value: model.scanFraction).frame(width: 420)
+                } else {
+                    ProgressView().progressViewStyle(.linear).frame(width: 420)
+                }
+                Text(model.progress + (model.scanRate > 0 ? " · \(model.scanRate.formatted()) a second" : ""))
+                    .monospacedDigit().foregroundStyle(.secondary)
+                Text(model.scanPath.isEmpty ? " " : model.scanPath)
+                    .font(.caption.monospaced()).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle).frame(width: 420)
             }
-            Text("About three minutes on a full disk. Nothing is changed while scanning. If macOS asks whether Headroom can look inside Documents, Downloads or Desktop, allowing it gives a fuller picture.")
+            Text("Under a minute on most disks. Nothing is changed while scanning. If macOS asks whether Headroom can look inside Documents, Downloads or Desktop, allowing it gives a fuller picture.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
+            Button("Stop") { model.cancelScan() }
+                .keyboardShortcut(".", modifiers: .command)
+                .help("Stop measuring (⌘.)")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

@@ -62,8 +62,6 @@ enum Palette {
     static func slot(_ index: Int) -> Swatch { series[index < 7 ? index + 1 : 0] }
 }
 
-let GB: Int64 = 1_000_000_000
-let MB: Int64 = 1_000_000
 
 /// Sizes the way Finder shows them: decimal units, three significant figures.
 func fmt(_ bytes: Int64) -> String {
