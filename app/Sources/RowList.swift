@@ -30,8 +30,9 @@ private struct FlatSection: Identifiable {
         let flats = sections.map { FlatSection(section: $0, rows: model.flatten($0.rows, prefix: $0.id + "/")) }
         let index = Dictionary(flats.flatMap(\.rows).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         Group {
-            if flats.allSatisfy(\.rows.isEmpty), !model.search.isEmpty {
+            if header == nil, flats.allSatisfy(\.rows.isEmpty), !model.search.isEmpty {
                 ContentUnavailableView.search(text: model.search)
+                    .onAppear { selection.removeAll(); model.highlighted = [] }
             } else {
                 List(selection: $selection) {
                     if let header {
@@ -69,6 +70,10 @@ private struct FlatSection: Identifiable {
                 }
                 .onChange(of: selection) { _, new in
                     model.highlighted = new.compactMap { index[$0]?.row }.filter { !$0.note }
+                }
+                .onChange(of: flats.flatMap(\.rows).map(\.id)) { _, visible in
+                    selection.formIntersection(visible)
+                    model.highlighted = selection.compactMap { index[$0]?.row }.filter { !$0.note }
                 }
                 .onDeleteCommand { model.review(model.highlighted.compactMap(\.cleanID)) }
                 .onKeyPress(.space) {
@@ -133,6 +138,12 @@ private struct FlatSection: Identifiable {
             Divider()
         }
         if flats.count == 1, let flat = flats.first, !flat.row.note {
+            if let id = flat.row.cleanID, id.hasPrefix("rule:"), model.candidates[id]?.safety == "safe" {
+                let skipped = model.skippedRules.contains(id)
+                Button(skipped ? "Include in Quick Cleanup" : "Skip in Quick Cleanup") {
+                    model.includeInQuickCleanup(id, skipped)
+                }
+            }
             if flat.expandable {
                 Button(flat.expanded ? "Hide Contents" : "Look Inside") { model.toggleExpanded(flat.id, browse: flat.row.browse) }
             }
@@ -244,7 +255,7 @@ private struct FlatSection: Identifiable {
                 }
                 MiniBar(fraction: Double(row.bytes) / Double(max(1, flat.max))).frame(width: 96).padding(.top, 2)
             }
-            .frame(minWidth: 150, alignment: .trailing)
+            .frame(minWidth: 105, alignment: .trailing)
         }
         .padding(.leading, indent)
         .padding(.vertical, 3)

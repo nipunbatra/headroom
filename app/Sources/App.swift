@@ -105,7 +105,7 @@ struct HeadroomApp: App {
 
     var body: some View {
         let ids = model.highlighted.compactMap(\.cleanID).filter { model.candidates[$0] != nil }
-        Button("Clean Safe Items…") { model.reviewSafe() }
+        Button("Quick Cleanup…") { model.reviewSafe() }
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(model.scan == nil || model.safeItems.isEmpty)
         Divider()
@@ -135,10 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let env = ProcessInfo.processInfo.environment
         Task { @MainActor in
-            await AppModel.shared.start()
             if let ids = env["HEADROOM_SELFTEST"], !ids.isEmpty {
                 exit(await DevTools.selfTest(ids.split(separator: ",").map(String.init), hard: env["HEADROOM_SELFTEST_HARD"] == "1"))
             }
+            await AppModel.shared.start()
             if let dir = env["HEADROOM_SNAPSHOT"], !dir.isEmpty {
                 await DevTools.snapshot(to: dir, only: env["HEADROOM_SNAPSHOT_PAGES"].map { Set($0.split(separator: ",").map(String.init)) })
             }
@@ -154,7 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         menu.addItem(withTitle: "Scan Disk", action: #selector(scan), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Clean Safe Items…", action: #selector(cleanSafe), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Quick Cleanup…", action: #selector(cleanSafe), keyEquivalent: "").target = self
         return menu
     }
 
@@ -173,11 +173,12 @@ enum DevTools {
 
     /// Cleans throwaway fixtures through the same model code the Clean button uses.
     static func selfTest(_ ids: [String], hard: Bool) async -> Int32 {
-        guard ids.allSatisfy({ $0.contains("_fixture") || $0.contains("HeadroomFixture") }) else {
-            log("SELFTEST refused: only fixture ids are allowed")
+        guard !ids.isEmpty, ids.allSatisfy({ $0.hasPrefix("file:~/") }),
+              let env = try? Env.fixture(ProcessInfo.processInfo.environment["HEADROOM_FIXTURE_HOME"]) else {
+            log("SELFTEST requires file:~/ paths and a temporary HEADROOM_FIXTURE_HOME named HeadroomFixture…")
             return 2
         }
-        let model = AppModel.shared
+        let model = AppModel(engine: Engine(env: env))
         for id in ids where model.candidates[id] == nil {
             model.candidates[id] = Candidate(id: id, title: id, bytes: 0, paths: [], safety: "review")
         }
@@ -188,7 +189,8 @@ enum DevTools {
         }
         session.hard = hard
         model.refreshDry()
-        try? await Task.sleep(for: .seconds(2))
+        for _ in 0..<500 where !session.ready { try? await Task.sleep(for: .milliseconds(10)) }
+        guard session.ready else { log("SELFTEST preview timed out"); return 1 }
         for it in session.items { log("DRY \(it.id): \(session.dry[it.id] ?? "") \(session.blocked[it.id].map { "BLOCKED " + $0 } ?? "")") }
         await model.runClean()
         for it in session.items { log("RESULT \(it.id): \(String(describing: session.marks[it.id]))") }
@@ -301,13 +303,15 @@ enum DevTools {
             }
             Thread.sleep(forTimeInterval: 0.4)
         }
-        // An app may always capture its own windows, so this still shows the real composited window.
+        // The older SDK can composite our own window even without Screen Recording.
+        #if compiler(<6.0)
         if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]),
            let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]), image.width > 10 {
             try? data.write(to: URL(fileURLWithPath: path))
             log("SNAPSHOT \(path) (own window)")
             return
         }
+        #endif
         guard let view = window.contentView?.superview ?? window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)

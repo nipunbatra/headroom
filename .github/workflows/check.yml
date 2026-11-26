@@ -1,0 +1,21 @@
+name: Check macOS app
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - run: ./test.sh
+      - run: ./build.sh
+      - name: Verify universal archive
+        run: |
+          ditto -x -k dist/Headroom.zip "$RUNNER_TEMP/release"
+          app="$RUNNER_TEMP/release/Headroom.app"
+          codesign --verify --deep --strict "$app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/Headroom"

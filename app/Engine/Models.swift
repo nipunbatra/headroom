@@ -108,7 +108,7 @@ struct Rule: Codable, Identifiable {
 
     var returns: Int64 { frees ?? bytes }
     /// False for rules that are handled by hand in the app that owns them.
-    var pickable: Bool { !(cmd?.hasPrefix("@") ?? false) }
+    var pickable: Bool { safety != "keep" && !(cmd?.hasPrefix("@") ?? false) }
     var cleanID: String { "rule:" + id }
 }
 
@@ -150,9 +150,12 @@ struct DupeGroup: Codable {
     struct Copy: Codable {
         var path: String
         var mtime: Double
+        var frees: Int64?
     }
     var bytes: Int64
     var files: [Copy]
+    var verified: Bool?
+    var extraBytes: Int64 { files.dropFirst().reduce(0) { $0 + ($1.frees ?? bytes) } }
 }
 
 struct Download: Codable {
@@ -202,6 +205,7 @@ struct CleanResult {
     var id: String
     var ok = false
     var errors: [String] = []
+    var preview: [ReviewedStep]?
     var freed: Int64 = 0
     var trashed = 0
     var summary = ""

@@ -83,6 +83,7 @@ enum Treemap {
     }
 
     static func layout(_ node: Node, size: CGSize) -> [MapTile] {
+        guard size.width >= 2, size.height >= 2 else { return [] }
         var tiles: [MapTile] = []
         func add(_ t: MapTile) {
             var t = t
@@ -109,7 +110,7 @@ enum Treemap {
             if kids.isEmpty {
                 add(MapTile(id: 0, rect: inner.insetBy(dx: 1, dy: 1), name: gname, full: gname, bytes: Int64(g.value), files: g.node?.f,
                             returns: g.node?.r, slot: slot, rest: g.node == nil, label: box.width > 86 && box.height > 32,
-                            zoom: g.node?.path, path: g.node?.path))
+                            zoom: hasKids ? g.node?.path : nil, path: g.node?.path))
             }
             for (t, r) in kids {
                 let tname = t.node?.n ?? "Smaller items"
@@ -174,7 +175,11 @@ enum Treemap {
                 }
             }
             .onTapGesture(count: 1) { (p: CGPoint) in
-                if let z = tiles.last(where: { $0.rect.contains(p) })?.zoom { model.zoom(z) }
+                guard let tile = tiles.last(where: { $0.rect.contains(p) }) else { return }
+                if let target = tile.zoom { model.zoom(target) }
+                else if let path = tile.path {
+                    if model.nodes[path]?.isFile == true { model.preview(path) } else { model.reveal([path]) }
+                }
             }
             .contextMenu {
                 if let p = hit?.path {

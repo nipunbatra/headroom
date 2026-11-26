@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 
 enum T {
+    static var count = 0
     static var passed = 0
     static var failed: [String] = []
     static var current = ""
@@ -11,9 +12,19 @@ enum T {
 
     static func test(_ name: String, _ body: () throws -> Void) {
         if let filter, !name.localizedCaseInsensitiveContains(filter) { return }
+        count += 1
         current = name
         let before = failed.count
         do { try body() } catch let r as Refused { fail("threw Refused: \(r.message)") } catch { fail("threw \(error)") }
+        print(failed.count == before ? "  ok    \(name)" : "  FAIL  \(name)")
+    }
+
+    @MainActor static func asyncTest(_ name: String, _ body: () async throws -> Void) async {
+        if let filter, !name.localizedCaseInsensitiveContains(filter) { return }
+        count += 1
+        current = name
+        let before = failed.count
+        do { try await body() } catch { fail("threw \(error)") }
         print(failed.count == before ? "  ok    \(name)" : "  FAIL  \(name)")
     }
 

@@ -1,0 +1,286 @@
+:root {
+  color-scheme: light;
+  --paper: #f8f8f4;
+  --ink: #192421;
+  --muted: #495751;
+  --line: #d4d8d0;
+  --blue: #204fc5;
+  font:
+    17px/1.55 "Helvetica Neue",
+    Arial,
+    sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+  font-synthesis: none;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  max-width: 1420px;
+  margin: 0 auto;
+  padding: 0 clamp(20px, 6vw, 96px);
+}
+a {
+  color: inherit;
+  text-underline-offset: 0.2em;
+}
+a:hover {
+  color: var(--blue);
+}
+a:focus-visible,
+button:focus-visible {
+  outline: 3px solid #1462cc;
+  outline-offset: 4px;
+}
+.nav,
+footer,
+nav,
+.brand,
+.links {
+  display: flex;
+  align-items: center;
+}
+.nav,
+footer {
+  justify-content: space-between;
+}
+.nav {
+  min-height: 84px;
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  gap: 7px;
+  text-decoration: none;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -1.2px;
+}
+.brand img {
+  margin-left: -5px;
+}
+nav,
+.links {
+  gap: 24px;
+}
+nav a,
+.links a,
+footer a {
+  font-size: 0.88rem;
+  font-weight: 550;
+}
+nav a {
+  text-decoration: none;
+}
+.intro,
+.features,
+.install {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: clamp(28px, 6vw, 100px);
+}
+.intro {
+  padding: clamp(52px, 6vw, 86px) 0 clamp(36px, 4vw, 62px);
+  align-items: center;
+}
+h1,
+h2,
+p {
+  margin: 0;
+}
+h1,
+h2 {
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.06em;
+}
+h1 {
+  font-size: clamp(54px, 6.4vw, 99px);
+}
+h2 {
+  font-size: clamp(35px, 3.6vw, 58px);
+  max-width: 11em;
+}
+.download {
+  max-width: 390px;
+}
+.download p {
+  font-size: clamp(17px, 1.45vw, 22px);
+  line-height: 1.46;
+  letter-spacing: -0.02em;
+  color: var(--muted);
+}
+.primary {
+  display: inline-flex;
+  gap: 11px;
+  align-items: center;
+  margin-top: 21px;
+  border-radius: 10px;
+  background: var(--ink);
+  padding: 11px 19px;
+  color: white;
+  text-decoration: none;
+  font-weight: 600;
+}
+.primary:hover {
+  color: white;
+  background: #263d37;
+}
+.primary span {
+  font-size: 21px;
+  line-height: 1;
+}
+.requirements,
+.caption {
+  color: var(--muted);
+  font-size: 0.79rem;
+}
+.requirements {
+  margin-top: 9px;
+}
+.requirements span {
+  margin: 0 4px;
+}
+.stage {
+  background: linear-gradient(145deg, #d4e2ed, #b8cfe1 54%, #c9dbeb);
+  border: 1px solid #b4c8d6;
+  border-radius: 21px;
+  padding: clamp(16px, 2.5vw, 36px) clamp(15px, 6vw, 95px) 0;
+  overflow: hidden;
+}
+.views {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin: auto auto clamp(15px, 2vw, 28px);
+  border-radius: 10px;
+  padding: 4px;
+  background: #edf3f7;
+  width: fit-content;
+}
+.views[hidden] {
+  display: none;
+}
+.views button {
+  cursor: pointer;
+  color: #344c5b;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 0.83rem;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.views button[aria-pressed="true"] {
+  background: #263e4b;
+  color: white;
+}
+.screen {
+  display: block;
+  border-radius: 10px 10px 0 0;
+  overflow: hidden;
+  max-width: 1100px;
+  margin: auto;
+  box-shadow: 0 14px 60px #2744573d;
+}
+.screen img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1440/944;
+  object-fit: contain;
+  background: #efedef;
+}
+.caption {
+  padding: 12px 1px 0;
+}
+.features,
+.install {
+  border-top: 1px solid var(--line);
+  margin-top: clamp(50px, 6vw, 88px);
+  padding-top: clamp(32px, 4vw, 60px);
+}
+dl {
+  margin: 0;
+}
+dl div {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+dl div:first-child {
+  padding-top: 0;
+}
+dt {
+  font-size: 1.13rem;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+dd,
+.install p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+.install ol {
+  padding-left: 1.25em;
+  margin: 0 0 18px;
+}
+.install li + li {
+  margin-top: 6px;
+}
+.install .links {
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+footer {
+  margin-top: 65px;
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+@media (max-width: 720px) {
+  .intro,
+  .features,
+  .install {
+    grid-template-columns: 1fr;
+    gap: 22px;
+  }
+  .intro {
+    padding-top: 42px;
+  }
+  .download {
+    max-width: 470px;
+  }
+  .nav {
+    min-height: 67px;
+  }
+  .screen {
+    border-radius: 6px 6px 0 0;
+  }
+  .stage {
+    padding: 14px 10px 0;
+    border-radius: 12px;
+  }
+  .views button {
+    padding: 7px 10px;
+  }
+  .features,
+  .install {
+    margin-top: 42px;
+  }
+  footer {
+    align-items: flex-start;
+    gap: 18px;
+  }
+  nav {
+    gap: 15px;
+  }
+  .brand {
+    font-size: 22px;
+  }
+  .links {
+    gap: 16px;
+  }
+}

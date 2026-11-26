@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      name="description"
+      content="Headroom is a local Mac disk space analyzer. Find large files, compare scans, and review exactly what a cleanup will remove."
+    />
+    <meta name="theme-color" content="#f8f8f4" />
+    <title>Headroom · Disk space for Mac</title>
+    <link rel="icon" href="images/headroom-icon.png" />
+    <link rel="stylesheet" href="site.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <a href="./" class="brand"
+        ><img
+          src="images/headroom-icon.png"
+          alt=""
+          width="42"
+          height="42"
+        />Headroom</a
+      >
+      <nav aria-label="Project">
+        <a href="#install">Install</a
+        ><a href="https://github.com/nipunbatra/headroom">GitHub ↗</a>
+      </nav>
+    </header>
+    <main>
+      <section class="intro" aria-labelledby="title">
+        <h1 id="title">Find what’s<br />filling your Mac.</h1>
+        <div class="download">
+          <p>
+            Explore disk usage, spot what grew, and choose exactly what to
+            clear. Headroom scans locally on your Mac.
+          </p>
+          <a
+            class="primary"
+            href="https://github.com/nipunbatra/headroom/releases/latest/download/Headroom.zip"
+            ><span aria-hidden="true">↓</span> Download for Mac</a
+          >
+          <div class="requirements">
+            macOS 14+ <span>·</span> Apple silicon and Intel
+          </div>
+        </div>
+      </section>
+      <section class="tour" aria-label="Explore the app">
+        <div class="stage">
+          <div class="views" aria-label="Screenshot views" hidden>
+            <button type="button" data-view="overview" aria-pressed="true">
+              Overview
+            </button>
+            <button type="button" data-view="large-files" aria-pressed="false">
+              Large Files
+            </button>
+            <button
+              type="button"
+              data-view="cleanup-review"
+              aria-pressed="false"
+            >
+              Cleanup Review
+            </button>
+          </div>
+          <a
+            class="screen"
+            href="images/headroom-overview.png"
+            aria-label="Open Overview screenshot at full size"
+            ><img
+              id="preview"
+              width="1440"
+              height="944"
+              src="images/headroom-overview.png"
+              alt="Headroom Overview with the startup disk, cleanup opportunities and recent changes."
+          /></a>
+        </div>
+        <p class="caption" aria-live="polite" id="caption">
+          Overview shows available space and the largest opportunities from the
+          last scan.
+        </p>
+      </section>
+      <section class="features" aria-labelledby="explore">
+        <h2 id="explore">What can I clear?</h2>
+        <dl>
+          <div>
+            <dt>Old files and installers</dt>
+            <dd>
+              Filter large files by size, kind, and modification date. Open a
+              Quick Look preview or reveal the original in Finder.
+            </dd>
+          </div>
+          <div>
+            <dt>Builds and caches</dt>
+            <dd>
+              Find idle projects, inspect individual models and build folders,
+              and choose which cleanup rules Quick Cleanup includes.
+            </dd>
+          </div>
+          <div>
+            <dt>Apps and their data</dt>
+            <dd>
+              Uninstall a bundle and keep its settings. Add individual support
+              files during review when you want those removed too.
+            </dd>
+          </div>
+          <div>
+            <dt>Duplicate files</dt>
+            <dd>
+              Review copies side by side in a group. Headroom compares the
+              contents again before removing a copy.
+            </dd>
+          </div>
+        </dl>
+      </section>
+      <section id="install" class="install" aria-labelledby="install-title">
+        <div>
+          <h2 id="install-title">Install Headroom</h2>
+          <p>Version 0.4.0 for macOS Sonoma and later.</p>
+        </div>
+        <div>
+          <ol>
+            <li>Download the ZIP and open it in Finder.</li>
+            <li>
+              Drag Headroom into Applications, then open it to start a read-only
+              scan.
+            </li>
+          </ol>
+          <p>
+            The download is Developer ID signed. This version is distributed without Apple notarization.
+            See the release notes for the checksum and Gatekeeper details.
+          </p>
+          <p class="links">
+            <a href="https://github.com/nipunbatra/headroom/releases/tag/v0.4.0"
+              >Release notes ↗</a
+            ><a href="https://github.com/nipunbatra/headroom#install"
+              >Build from source ↗</a
+            >
+          </p>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <span>Headroom for macOS</span
+      ><a
+        href="https://github.com/nipunbatra/headroom/blob/main/docs/storage-audit.md"
+        >Storage and usability audit ↗</a
+      >
+    </footer>
+    <script>
+      const shots = {
+        overview: [
+          "Headroom Overview with the startup disk, cleanup opportunities and recent changes.",
+          "Overview shows available space and the largest opportunities from the last scan.",
+        ],
+        "large-files": [
+          "Large Files showing size and modification-date filters and files from an example scan.",
+          "Combine size, kind, and modification date to narrow the list before opening a file.",
+        ],
+        "cleanup-review": [
+          "Cleanup Review lists three items with the amount, command or removal method for each.",
+          "Expand a target to see what will move to Trash, be deleted, or run through a tool.",
+        ],
+      };
+      const views = document.querySelector(".views");
+      views.hidden = false;
+      views.addEventListener("click", (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        for (const other of views.querySelectorAll("button"))
+          other.setAttribute("aria-pressed", String(other === button));
+        const name = button.dataset.view;
+        const preview = document.querySelector("#preview");
+        preview.src = "images/headroom-" + name + ".png";
+        preview.alt = shots[name][0];
+        preview.parentElement.href = preview.src;
+        preview.parentElement.setAttribute(
+          "aria-label",
+          "Open " + button.textContent + " screenshot at full size",
+        );
+        document.querySelector("#caption").textContent = shots[name][1];
+      });
+    </script>
+  </body>
+</html>

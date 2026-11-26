@@ -6,8 +6,12 @@
 #   ./test.sh --no-python  skip the cross-check
 set -euo pipefail
 cd "${0:A:h}"
-BIN=$(mktemp -d)/headroom-tests
-swiftc -Onone -parse-as-library -target "$(uname -m)-apple-macos14.0" -o "$BIN" app/Engine/*.swift app/Tests/*.swift
+# Expose the SDK’s descriptor-relative recursive removal API to Swift.
+REMOVEFILE_HEADER="$(xcrun --sdk macosx --show-sdk-path)/usr/include/removefile.h"
+TEST_DIR=$(mktemp -d)
+trap 'rm -rf "$TEST_DIR"' EXIT
+BIN="$TEST_DIR/headroom-tests"
+swiftc -Onone -import-objc-header "$REMOVEFILE_HEADER" -parse-as-library -target "$(uname -m)-apple-macos14.0" -o "$BIN" app/Engine/*.swift app/Sources/{AppModel,Rows,Theme,Engine,MapView,RowList}.swift app/Tests/*.swift
 if [[ "${1:-}" != "" && "${1:-}" != "--no-python" ]]; then
   "$BIN" "$1"
   exit $?
@@ -16,9 +20,8 @@ fi
 [[ "${1:-}" == "--no-python" ]] && exit 0
 command -v python3 >/dev/null || { echo "python3 not found: skipping the cross-check with scan.py"; exit 0; }
 # Both scanners measure the same fixture home; their reports must agree.
-BASE=$(mktemp -d)/crosscheck
+BASE="$TEST_DIR/crosscheck"
 mkdir -p "$BASE"
-trap 'chmod -R u+rwx "$BASE" 2>/dev/null; rm -rf "$BASE"' EXIT
 "$BIN" --make-fixture "$BASE/home" "$BASE/swift"
 HOME_REAL=$(cd "$BASE/home" && pwd -P)
 "$BIN" --scan-fixture "$HOME_REAL" "$(cd "$BASE" && pwd -P)/swift"

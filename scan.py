@@ -1096,11 +1096,13 @@ def app_running(app):
     return any(line.strip().startswith(app + "/") for line in r.stdout.splitlines())
 
 
-def app_list(sizes, frees=None):
+def app_list(sizes, frees=None, root="/"):
     apps = []
     shared = shared_app_names()
     for base in APP_DIRS:
         base = expand(base)
+        if os.path.commonpath((root, base)) != root:
+            continue
         try:
             names = os.listdir(base)
         except OSError:
@@ -1115,6 +1117,8 @@ def app_list(sizes, frees=None):
                     a["bundleId"] = bid
                 left = []
                 for lp in app_leftovers(p, shared):
+                    if os.path.commonpath((root, lp)) != root:
+                        continue
                     if os.path.isdir(lp) and not os.path.islink(lp):
                         left.append(with_frees({"path": disp(lp), "bytes": sizes.get(lp, 0)},
                                                frees(lp) if frees else None))
@@ -1313,7 +1317,7 @@ def run_scan(args):
         "bigFiles": big_files,
         "dupes": find_dupes(r["big"], strip_root),
         "downloads": downloads(sizes, frees),
-        "apps": app_list(sizes, frees),
+        "apps": app_list(sizes, frees, root=root[len(strip_root):] or "/"),
         "denied": sorted((disp(p) for p in r["denied"]), key=lambda p: (not p.startswith("~"), p))[:200],
         "deniedCount": len(r["denied"]),
     }

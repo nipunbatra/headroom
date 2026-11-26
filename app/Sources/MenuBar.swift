@@ -21,8 +21,11 @@ import SwiftUI
     var body: some View {
         VStack(alignment: .leading, spacing: Space.m) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(fmt(model.free)).font(.system(size: 28, weight: .semibold, design: .rounded)).monospacedDigit()
-                Text("free of \(fmt(model.total))").foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(fmt(model.free) + " free").font(.system(size: 26, weight: .semibold, design: .rounded))
+                        .monospacedDigit().fixedSize()
+                    Text("of \(fmt(model.total)) capacity").font(.callout).foregroundStyle(.secondary)
+                }
                 Spacer(minLength: Space.xs)
                 PillView(pill: model.health)
             }
@@ -47,7 +50,7 @@ import SwiftUI
             }
             Divider()
             HStack(spacing: Space.s) {
-                Button("Clean Safe Items…") {
+                Button("Quick Cleanup…") {
                     open()
                     model.reviewSafe()
                 }
@@ -95,7 +98,7 @@ import SwiftUI
                     Toggle("Show Headroom in the menu bar", isOn: $menuBar)
                     Toggle("Show free space next to the icon", isOn: $menuBarText).disabled(!menuBar)
                     Toggle("Keep running when the window is closed", isOn: $keepRunning).disabled(!menuBar)
-                    Toggle("Open Headroom at login", isOn: Binding(get: { atLogin }, set: setLogin))
+                    Toggle("Open Headroom at login", isOn: Binding(get: { atLogin }, set: { setLogin($0) }))
                     if !loginError.isEmpty {
                         Text(loginError).font(.callout).foregroundStyle(.secondary)
                     }
@@ -116,6 +119,29 @@ import SwiftUI
             }
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
+
+            Form {
+                Section("Rules included in Quick Cleanup") {
+                    if model.quickRules.isEmpty {
+                        Text("Available rules appear after a scan finds rebuildable files.").foregroundStyle(.secondary)
+                    }
+                    ForEach(model.quickRules) { rule in
+                        Toggle(rule.title, isOn: Binding(
+                            get: { !model.skippedRules.contains(rule.id) },
+                            set: { model.includeInQuickCleanup(rule.id, $0) }
+                        ))
+                    }
+                }
+                Text("Headroom remembers these choices for future quick cleanups. You can still select an item directly in Clean Up.")
+                    .font(.callout).foregroundStyle(.secondary)
+                if !model.skippedRules.isEmpty {
+                    Button("Include All Rules Again") {
+                        for id in model.skippedRules { model.includeInQuickCleanup(id, true) }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .tabItem { Label("Quick Cleanup", systemImage: "checklist") }
 
             Form {
                 Section("Access") {

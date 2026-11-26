@@ -118,7 +118,7 @@ import SwiftUI
                         .help("Stop measuring and keep the current figures (⌘.)")
                 } else {
                     Button("Scan", systemImage: "arrow.clockwise") { model.rescan() }
-                        .help("Measure the disk again; takes under a minute (⌘R)")
+                        .help("Measure the disk again (⌘R)")
                 }
                 Button("Cleanup List", systemImage: "checklist") { model.showInspector.toggle() }
                     .help(model.showInspector ? "Hide the cleanup list (⌃⌘I)" : "Show the items ticked for cleaning (⌃⌘I)")
@@ -132,17 +132,44 @@ import SwiftUI
         case .cleanup: RowList(sections: model.cleanupSections())
         case .changes: ChangesView()
         case .map: MapView()
-        case .files: RowList(sections: model.fileSections())
-        case .projects: RowList(sections: model.projectSections())
+        case .files: focusedList(model.fileSections())
+        case .projects: focusedList(model.projectSections())
         case .downloads:
             if model.scan?.downloads == nil {
                 ContentUnavailableView("Downloads Could Not Be Read", systemImage: "arrow.down.circle",
                                        description: Text("Allow Headroom to use the Downloads folder in System Settings, then scan again."))
             } else {
-                RowList(sections: model.downloadSections())
+                focusedList(model.downloadSections())
             }
         case .apps: RowList(sections: model.appSections())
         }
+    }
+
+    private func focusedList(_ sections: [RowSection]) -> some View {
+        @Bindable var model = model
+        return RowList(sections: sections, header: AnyView(
+            VStack(alignment: .leading, spacing: Space.s) {
+                Picker("Show", selection: $model.focus) {
+                    ForEach(ReviewFocus.choices(for: model.page)) { choice in Text(choice.rawValue).tag(choice) }
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                if model.page == .files, model.focus != .duplicates {
+                    HStack(spacing: Space.m) {
+                        Picker("On disk", selection: $model.minimumFileSize) {
+                            ForEach(FileSizeFilter.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }.fixedSize()
+                        Picker("Modified", selection: $model.modifiedBefore) {
+                            ForEach(FileAgeFilter.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }.fixedSize()
+                        if model.minimumFileSize != .any || model.modifiedBefore != .any {
+                            Button("Reset") { model.minimumFileSize = .any; model.modifiedBefore = .any }
+                                .help("Clear size and modification date filters")
+                        }
+                    }.controlSize(.small)
+                }
+            }
+            .padding(.vertical, Space.s)
+        ))
     }
 
     @ViewBuilder private var filter: some View {
@@ -156,12 +183,14 @@ import SwiftUI
                 }
                 .help("Show one kind of place")
             case .files:
+                if model.focus != .duplicates {
                 Picker("Kind", selection: $model.kind) {
                     Text("All Kinds").tag("all")
                     ForEach(model.fileKinds, id: \.self) { Text($0).tag($0) }
                 }
                 .help("Show one kind of file")
                 sortPicker(dates: true)
+                }
             case .projects:
                 Picker("Folder Type", selection: $model.tag) {
                     Text("All Types").tag("all")
@@ -248,7 +277,7 @@ import SwiftUI
                 Text(model.scanPath.isEmpty ? " " : model.scanPath)
                     .font(.caption.monospaced()).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle).frame(width: 420)
             }
-            Text("Under a minute on most disks. Nothing is changed while scanning. If macOS asks whether Headroom can look inside Documents, Downloads or Desktop, allowing it gives a fuller picture.")
+            Text("Scanning reads file information. Allow access to Documents, Downloads and Desktop when prompted to include them in the results.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

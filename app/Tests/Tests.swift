@@ -5,7 +5,7 @@ import Foundation
 
 @main
 enum TestMain {
-    static func main() {
+    @MainActor static func main() async {
         let args = CommandLine.arguments
         if args.count >= 4, args[1] == "--make-fixture" {       // for the cross-check with scan.py
             CrossCheck.make(home: args[2], support: args[3])
@@ -30,7 +30,10 @@ enum TestMain {
         reports()
         print("Changes and history")
         changes()
-        print("\n\(T.passed) checks passed, \(T.failed.count) failed")
+        auditRegressionTests()
+        await workflowTests()
+        if T.count == 0 { T.fail("No tests matched") }
+        print("\n\(T.count) tests, \(T.passed) checks passed, \(T.failed.count) failed")
         for f in T.failed { print("  " + f) }
         exit(T.failed.isEmpty ? 0 : 1)
     }
@@ -80,7 +83,7 @@ func pathPolicy() {
         f.dir("real/inner")
         f.link("alias", to: f.home + "/real")
         T.expect(!Cleaner.userPathOK(f.home + "/escape/data", env: f.env), "parent resolves outside home")
-        T.expect(Cleaner.userPathOK(f.home + "/alias/inner", env: f.env), "a link that stays inside home is allowed")
+        T.expect(!Cleaner.userPathOK(f.home + "/alias/inner", env: f.env), "aliased parents cannot change a path’s cleanup policy")
     }
 
     T.test("isNormal matches what a normalised absolute path looks like") {
@@ -123,7 +126,7 @@ func resolving() {
         let model = f.dir(".cache/huggingface/hub")
         let backup = f.dir("Library/Application Support/MobileSync/Backup/phone")
         T.equal(try c.resolve("rule:uv", hard: false, scan: nil), [.run("uv cache clean")])
-        T.equal(try c.resolve("rule:pycache", hard: false, scan: nil), [.run(Rules.pycacheCommand)])
+        T.refused("individual") { try c.resolve("rule:pycache", hard: false, scan: nil) }
         T.equal(try c.resolve("rule:logs", hard: false, scan: nil), [.delete(log)], "safe rules delete their contents")
         T.equal(try c.resolve("rule:hf", hard: false, scan: nil), [.delete(model)], "download caches are deleted outright")
         T.equal(try c.resolve("rule:ios-backups", hard: false, scan: nil), [.trash(backup)], "review rules go to the Trash")
@@ -173,11 +176,16 @@ func resolving() {
         f.dir("Library/Caches/com.example.sample2")
         f.dir("Library/Application Support/SampleOther")
         f.dir("Library/Application Support/Google")
-        let steps = try c.resolve("app:~/Applications/Sample.app", hard: false, scan: nil)
+        let id = "app:~/Applications/Sample.app"
+        let selected = Set([cache, support, prefs])
+        T.equal(try c.resolve(id, hard: false, scan: nil), [.trash(app)])
+        T.equal(try c.resolve(id, hard: false, scan: nil, selectedSupport: [cache]), [.trash(app), .trash(cache)])
+        T.refused("no longer belongs") { try c.resolve(id, hard: true, scan: nil, selectedSupport: ["~/Documents/notes"]) }
+        let steps = try c.resolve(id, hard: false, scan: nil, selectedSupport: selected)
         T.equal(Set(steps.map { "\($0)" }), Set([app, cache, support, prefs].map { "\(Step.trash($0))" }))
         T.equal(steps.first, .trash(app), "the app itself goes first")
-        T.equal(try c.resolve("app:~/Applications/Sample.app", hard: true, scan: nil).count, 4)
-        T.expect(try c.resolve("app:~/Applications/Sample.app", hard: true, scan: nil).allSatisfy { if case .delete = $0 { return true } else { return false } })
+        T.equal(try c.resolve(id, hard: true, scan: nil, selectedSupport: selected).count, 4)
+        T.expect(try c.resolve(id, hard: true, scan: nil, selectedSupport: selected).allSatisfy { if case .delete = $0 { return true } else { return false } })
     }
 
     T.test("uninstall refuses things that are not apps in an Applications folder") {
@@ -250,6 +258,11 @@ func resolving() {
         T.refused("not a Hugging Face cache") { try c.resolve("hfrepo:~/Documents/models--org--a", hard: false, scan: nil) }
         T.refused("not a Hugging Face cache") { try c.resolve("hforphans:~/Documents", hard: false, scan: nil) }
         T.refused("not a Hugging Face cache") { try c.resolve("hfrepo:~/.cache/huggingface/hub/../hub/models--org--a", hard: false, scan: nil) }
+        let id = "hfrepo:~/.cache/huggingface/hub/models--org--a"
+        let preview = c.clean(id, hard: false, dry: true, scan: nil)
+        f.text(a + "/metadata", "new revision")
+        T.expect(!c.clean(id, hard: false, dry: false, scan: nil, reviewed: preview.preview).ok)
+        T.expect(lexists(a) && lexists(hub + "/blobs/aa/only-a"))
         // after a is removed, the blob both used belongs to b alone
         _ = c.clean("hfrepo:~/.cache/huggingface/hub/models--org--a", hard: false, dry: false, scan: nil)
         T.expect(!lexists(a) && !lexists(hub + "/blobs/aa/only-a"), "repo and its own blob are gone")

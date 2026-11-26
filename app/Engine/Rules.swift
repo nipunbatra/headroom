@@ -16,10 +16,10 @@ struct RuleDef {
 
 enum Rules {
     static let table: [RuleDef] = [
-        RuleDef(id: "trash", group: "system", safety: "safe", title: "Trash",
+        RuleDef(id: "trash", group: "system", safety: "review", title: "Home Trash",
                 path: "~/.Trash",
-                why: "Files you already threw away. They keep using space until the Trash is emptied.",
-                cmd: "osascript -e 'tell application \"Finder\" to empty trash'"),
+                why: "Permanently removes every item currently in your home Trash. Review its contents in Finder first.",
+                cmd: nil),
         RuleDef(id: "logs", group: "system", safety: "safe", title: "App logs",
                 path: "~/Library/Logs",
                 why: "Diagnostic logs and crash reports. Nothing reads them unless you are debugging.",
@@ -128,9 +128,9 @@ enum Rules {
                 path: "~/.gradle/caches",
                 why: "Downloaded dependencies and build caches.",
                 cmd: nil),
-        RuleDef(id: "maven", group: "dev", safety: "safe", title: "Maven repository",
+        RuleDef(id: "maven", group: "dev", safety: "review", title: "Maven repository",
                 path: "~/.m2/repository",
-                why: "Downloaded Java dependencies.",
+                why: "Downloaded dependencies and locally installed artifacts. Some may exist only on this Mac.",
                 cmd: nil),
         RuleDef(id: "cargo", group: "dev", safety: "safe", title: "Cargo registry",
                 path: "~/.cargo/registry",
@@ -222,8 +222,8 @@ enum Rules {
                 cmd: "@manual"),
         RuleDef(id: "docker", group: "containers", safety: "review", title: "Docker Desktop",
                 path: "~/Library/Containers/com.docker.docker",
-                why: "Images, containers, volumes and build cache. The command keeps volumes and anything in use.",
-                cmd: "docker system prune -a -f"),
+                why: "Review images, containers and build cache in Docker Desktop. Its active context can point to another machine.",
+                cmd: "@manual"),
         RuleDef(id: "orbstack", group: "containers", safety: "review", title: "OrbStack",
                 path: "~/Library/Group Containers/HUAQ24HBR6.dev.orbstack",
                 why: "OrbStack's disk image for containers and Linux machines.",
@@ -285,7 +285,6 @@ enum Rules {
         ] }
     }
 
-    static let pycacheCommand = "find \"$HOME\" -path \"$HOME/Library\" -prune -o -type d -name __pycache__ -prune -exec rm -rf {} +"
     /// Folders whose children are each their own cache.
     static let cacheContainers = ["~/Library/Caches", "~/.cache"]
     /// Download caches: removed outright, like any cache.
@@ -319,10 +318,10 @@ enum Rules {
         "android-avd": ["*"],
     ]
     static let opaqueSuffixes = [".app", ".photoslibrary", ".sparsebundle", ".imovielibrary", ".fcpbundle", ".musiclibrary", ".vmwarevm", ".pvm", ".utm", ".xcarchive"]
-    static let toolCaches: Set<String> = [".ipynb_checkpoints", ".mypy_cache", ".parcel-cache", ".pytest_cache", ".ruff_cache", ".tox", ".turbo"]
+    static let toolCaches: Set<String> = [".mypy_cache", ".parcel-cache", ".pytest_cache", ".ruff_cache", ".tox", ".turbo"]
     static let mlLogs: Set<String> = ["lightning_logs", "mlruns", "wandb"]
     static let noTagHome: Set<String> = ["Applications", "Library", "anaconda3", "go", "mambaforge", "miniconda3", "miniforge3", "opt"]
-    static let rebuildable: Set<String> = [".ipynb_checkpoints", ".mypy_cache", ".next", ".nuxt", ".parcel-cache", ".pytest_cache", ".ruff_cache", ".tox", ".turbo", "Pods", "__pycache__", "node_modules", "target"]
+    static let rebuildable: Set<String> = [".mypy_cache", ".next", ".nuxt", ".parcel-cache", ".pytest_cache", ".ruff_cache", ".tox", ".turbo", "Pods", "__pycache__", "node_modules", "target"]
     static let extraPath = ["/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin", "~/.cargo/bin", "~/.bun/bin", "~/go/bin"]
     static let leftoverSpots = ["~/Library/Application Support/{id}", "~/Library/Application Support/{name}", "~/Library/Caches/{id}", "~/Library/Caches/{name}", "~/Library/Preferences/{id}.plist", "~/Library/Saved Application State/{id}.savedState", "~/Library/HTTPStorages/{id}", "~/Library/HTTPStorages/{id}.binarycookies", "~/Library/WebKit/{id}", "~/Library/Containers/{id}", "~/Library/Application Scripts/{id}", "~/Library/Logs/{name}", "~/Library/Cookies/{id}.binarycookies"]
     static let vendorFolders: Set<String> = ["adobe", "apple", "google", "jetbrains", "microsoft", "mozilla"]

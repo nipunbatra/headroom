@@ -23,7 +23,7 @@ import SwiftUI
             let a = Int((Double(acc) / Double(total) * Double(n)).rounded())
             acc += s.bytes
             let z = s.id == "free" ? n : Int((Double(acc) / Double(total) * Double(n)).rounded())
-            if a < z { for i in a..<min(z, n) { out[i] = s } }
+            for i in max(0, min(a, n))..<max(0, min(max(a, z), n)) { out[i] = s }
         }
         let fallback = segments.count > 1 ? segments[segments.count - 2] : last
         return out.map { $0 ?? fallback }
@@ -207,7 +207,8 @@ struct FlowLayout: Layout {
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let p):
-                            let x = p.x - geo[proxy.plotAreaFrame].origin.x
+                            guard let frame = proxy.plotFrame else { return }
+                            let x = p.x - geo[frame].origin.x
                             guard let date: Date = proxy.value(atX: x) else { return }
                             hover = samples.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
                         case .ended:
@@ -236,11 +237,11 @@ struct FlowLayout: Layout {
                     hero(scan)
                     if width >= 860 {
                         HStack(alignment: .top, spacing: Space.l) {
-                            VStack(spacing: Space.l) { winsCard; notesCard(scan) }
-                            VStack(spacing: Space.l) { changesCard(scan); trendCard; placesCard(scan); kindsCard(scan) }.frame(width: 370)
+                            VStack(spacing: Space.l) { reviewCard(scan); winsCard; notesCard(scan) }
+                            VStack(spacing: Space.l) { placesCard(scan); changesCard(scan); trendCard; kindsCard(scan) }.frame(width: 310)
                         }
                     } else {
-                        VStack(spacing: Space.l) { winsCard; changesCard(scan); trendCard; placesCard(scan); kindsCard(scan); notesCard(scan) }
+                        VStack(spacing: Space.l) { reviewCard(scan); winsCard; placesCard(scan); changesCard(scan); trendCard; kindsCard(scan); notesCard(scan) }
                     }
                 }
                 .padding(Space.l)
@@ -277,7 +278,7 @@ struct FlowLayout: Layout {
             LevelMeter.Segment(id: "review", label: "Worth reviewing", bytes: t.review, color: Palette.review.color),
             LevelMeter.Segment(id: "files", label: "Everything else scanned", bytes: t.files, color: Palette.series[1].color),
             LevelMeter.Segment(id: "system", label: "System and unreadable", bytes: t.system, color: Palette.series[0].color),
-        ].filter { $0.bytes >= 100 * MB }
+        ].filter { $0.bytes > 0 }
         segs.append(LevelMeter.Segment(id: "free", label: "Free", bytes: model.free, color: Palette.track.color))
         return segs
     }
@@ -288,25 +289,25 @@ struct FlowLayout: Layout {
         return Card {
             HStack(alignment: .top, spacing: Space.l) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Macintosh HD · \(scan.os)").font(.callout).foregroundStyle(.secondary)
-                    HStack(alignment: .firstTextBaseline, spacing: Space.s) {
-                        Text(fmt(model.free)).font(.system(size: 40, weight: .semibold, design: .rounded)).monospacedDigit()
-                        Text("free of \(fmt(model.total))").font(.title2).foregroundStyle(.secondary)
-                        PillView(pill: model.health)
+                    Label("Startup disk", systemImage: "internaldrive").font(.headline).foregroundStyle(.secondary)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .firstTextBaseline, spacing: Space.s) {
+                            Text(fmt(model.free)).font(.system(size: 42, weight: .semibold, design: .rounded)).monospacedDigit()
+                            Text("available").font(.title2).foregroundStyle(.secondary)
+                        }
+                        Text("\(fmt(model.free)) free").font(.title.bold()).monospacedDigit()
                     }
-                    Text((model.freeFraction < 0.10 ? "macOS wants 10 to 20 GB spare for updates, swap and indexing. " : "")
-                         + (safe.isEmpty ? "Nothing on the safe list right now." : "Clearing the safe list should leave about \(fmt(model.free + safeTotal)) free."))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text("\(fmt(model.totals.used)) used of \(fmt(model.total))")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: Space.m)
                 if !safe.isEmpty {
                     VStack(alignment: .trailing, spacing: 6) {
-                        Button("Clean Safe Items…") { model.reviewSafe() }
+                        Button("Quick Cleanup…") { model.reviewSafe() }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
                             .help("Review the caches and build folders that rebuild themselves, then confirm (⇧⌘K)")
-                        Text("\(fmt(safeTotal)) in \(plural(safe.count, "place"))").font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                        Text("Review up to \(fmt(safeTotal))").font(.callout).monospacedDigit().foregroundStyle(.secondary)
                     }
                 }
             }
@@ -328,9 +329,51 @@ struct FlowLayout: Layout {
         }
     }
 
+    private func reviewCard(_ scan: Scan) -> some View {
+        let downloads = (scan.downloads ?? []).filter { !model.cleared.contains("file:" + $0.path) }
+        let installers = downloads.filter(\.installer)
+        let old = downloads.filter { $0.mtime > 0 && model.days($0.mtime) > 365 }
+        let groups = model.remainingDuplicateGroups
+        let idle = (scan.found ?? []).filter { model.foundSafety($0) == "safe" && !model.cleared.contains("file:" + $0.path) }
+        return Card("Where to start") {
+            VStack(spacing: 0) {
+                route("Installers", symbol: "shippingbox", detail: plural(installers.count, "download"),
+                      bytes: installers.reduce(0) { $0 + $1.returns }, page: .downloads, focus: .installers)
+                Divider()
+                route("Older downloads", symbol: "calendar", detail: "Last changed over a year ago",
+                      bytes: old.reduce(0) { $0 + $1.returns }, page: .downloads, focus: .older)
+                Divider()
+                route("Idle build folders", symbol: "hammer", detail: "Projects quiet for over 90 days",
+                      bytes: idle.reduce(0) { $0 + $1.returns }, page: .projects, focus: .idle)
+                Divider()
+                route("Duplicate groups", symbol: "doc.on.doc", detail: plural(groups.count, "group"),
+                      bytes: groups.reduce(0) { $0 + $1.extraBytes }, page: .files, focus: .duplicates)
+            }
+        }
+    }
+
+    private func route(_ title: String, symbol: String, detail: String, bytes: Int64, page: Page, focus: ReviewFocus) -> some View {
+        Button { model.go(page, focus: focus) } label: {
+            HStack(spacing: 12) {
+                Image(systemName: symbol).font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.tint).frame(width: 32, height: 32)
+                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).fontWeight(.medium)
+                    Text(detail).font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(fmt(bytes)).monospacedDigit().foregroundStyle(.secondary)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 7).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).help("Review " + title.lowercased())
+    }
+
     private var winsCard: some View {
         let wins = model.flatten(model.wins(), prefix: "wins/")
-        return Card("Biggest Wins", subtitle: "Clean one now, or tick several and clean them together.",
+        return Card("Largest cleanup items",
                     trailing: AnyView(Button("See All") { model.go(.cleanup) }.controlSize(.small))) {
             VStack(spacing: 0) {
                 ForEach(wins) { flat in
@@ -390,7 +433,7 @@ struct FlowLayout: Layout {
     private func placesCard(_ scan: Scan) -> some View {
         let base = model.homeNode ?? scan.tree
         var nodes = base.children
-        if model.homeNode != nil { nodes += scan.tree.children.filter { $0.n != "Users" } }
+        if model.homeNode != nil && base !== scan.tree { nodes += scan.tree.children.filter { $0.n != "Users" } }
         let items = nodes.sorted { $0.s > $1.s }.prefix(9).map { n in
             BarList.Item(id: n.path, name: n.path, bytes: n.s, note: "Click to open it in the disk map", action: { model.zoom(n.path) })
         }
@@ -409,7 +452,7 @@ struct FlowLayout: Layout {
         var notes: [(String, String)] = []
         notes.append(("\(scan.stats.files.formatted()) files", " in \(scan.stats.dirs.formatted()) folders were measured in \(Int(scan.seconds.rounded())) seconds. Scanning changes nothing."))
         if let unique = scan.disk.unique, scan.disk.scanned - unique > GB {
-            notes.append(("\(fmt(scan.disk.scanned - unique)) is shared between cloned files.", " Package managers, Finder duplicates and browser updates make copies that share space. Every size offered for cleaning is what deleting it returns; where that is less than the size on disk, both are shown."))
+            notes.append(("\(fmt(scan.disk.scanned - unique)) is shared between cloned files.", " Package managers, Finder duplicates and browser updates make copies that share space. Estimates take shared blocks into account."))
         }
         if model.purgeable > GB {
             notes.append(("macOS can free about \(fmt(model.purgeable)) more on its own.", " Local snapshots and purgeable caches are released when space runs short, so Finder counts them as available."))
@@ -433,13 +476,19 @@ struct FlowLayout: Layout {
                     (Text(note.0).fontWeight(.semibold) + Text(note.1).foregroundColor(.secondary))
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if denied > 0, !model.fullDiskAccess {
-                    HStack(alignment: .firstTextBaseline) {
-                        (Text("\(denied.formatted()) folders could not be opened.").fontWeight(.semibold)
-                         + Text(" With Full Disk Access, Headroom can also measure the Trash, Mail, Messages and Photos.").foregroundColor(.secondary))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: Space.s)
-                        Button("Open System Settings") { openFullDiskAccess() }.controlSize(.small)
+                if denied > 0 {
+                    DisclosureGroup(plural(denied, "folder") + " could not be opened") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(scan.denied ?? [], id: \.self) { path in
+                                Text(path).font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                            if denied > (scan.denied?.count ?? 0) {
+                                Text("Showing the first \(scan.denied?.count ?? 0) recorded paths.").font(.caption)
+                            }
+                            if !model.fullDiskAccess {
+                                Button("Open Full Disk Access Settings…") { openFullDiskAccess() }.controlSize(.small)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }

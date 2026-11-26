@@ -14,9 +14,8 @@ enum Report {
     static func tempRules(_ env: Env) -> [RuleDef] {
         guard let base = env.tempBase else { return [] }
         var out = [
-            RuleDef(id: "tmp-user", group: "system", safety: "safe", title: "Temporary files", path: base + "/T",
-                    why: "Scratch files apps left behind. The command removes only entries untouched for three days; the size shown is the whole folder.",
-                    cmd: #"find "$(getconf DARWIN_USER_TEMP_DIR)" -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} +"#),
+            RuleDef(id: "tmp-user", group: "system", safety: "review", title: "Temporary files", path: base + "/T",
+                    why: "Temporary files may belong to running apps. Quit the owning app before reviewing its files.", cmd: "@manual"),
             RuleDef(id: "cache-user", group: "system", safety: "keep", title: "System-managed app caches", path: base + "/C",
                     why: "Wallpapers, compiled shaders and similar. macOS rebuilds and trims them itself.", cmd: "@manual"),
         ]
@@ -39,11 +38,12 @@ enum Report {
     static func buildRules(_ core: ScanCore, env: Env, opts: ScanOptions) -> [Rule] {
         var out: [Rule] = []
         if let pyc = core.tagTotals["pycache"], pyc.bytes >= opts.ruleMin {
-            out.append(Rule(id: "pycache", group: "dev", safety: "safe", title: "Python bytecode (__pycache__)", paths: [], bytes: pyc.bytes,
+            out.append(Rule(id: "pycache", group: "dev", safety: "review", title: "Python bytecode (__pycache__)", paths: [], bytes: pyc.bytes,
                             why: "\(grouped(pyc.count)) folders of compiled .pyc files. Python rewrites them the next time the code runs.",
-                            cmd: Rules.pycacheCommand))
+                            cmd: "@manual"))
         }
-        let defs = allRules(env)
+        let whole = opts.root == "/" || opts.root == opts.dataRoot
+        let defs = whole || env.tempBase.map({ $0.hasPrefix(opts.root + "/") }) == true ? allRules(env) : Rules.table
         let specific = Set(defs.map { env.expand($0.path) })
         out += parallelMap(defs) { def -> Rule? in          // each rule looks only at its own folder
             let p = env.expand(def.path)
@@ -66,6 +66,7 @@ enum Report {
         }.compactMap { $0 }
         for container in Rules.cacheContainers {
             let c = env.expand(container)
+            guard whole || c == opts.root || c.hasPrefix(opts.root + "/") else { continue }
             guard let names = listNames(c)?.sorted() else { continue }
             var rest: [String] = []
             var restBytes: Int64 = 0, restBack: Int64 = 0
@@ -118,27 +119,27 @@ enum Report {
                     n += 1
                     seen = max(seen, s.atime, s.mtime)
                     changed = max(changed, s.mtime)
+                    if n == cap { break }
                 }
             }
         }
         return (seen, changed)
     }
 
-    /// Every file-like entry under a folder, never following a link into another folder.
-    /// `link` is true for a symlink that does not point at a folder.
-    static func filesUnder(_ root: String, _ visit: (_ path: String, _ link: Bool) -> Void) {
+    /// A partial index cannot establish that a blob is unused. Missing optional stores are
+    /// ordinary, but linked, cloud-only, or unreadable directories make ownership unknown.
+    static func filesUnder(_ root: String, _ visit: (String, Bool) throws -> Void) throws {
+        if lstatOf(root) == nil, errno == ENOENT { return }
         var stack = [root]
         while let dir = stack.popLast() {
-            for name in listNames(dir) ?? [] {
+            guard realPath(dir) == dir, let names = listNames(dir) else {
+                throw Refused("cannot inspect model cache directory " + dir)
+            }
+            for name in names {
                 let p = dir + "/" + name
-                guard let st = lstatOf(p) else { continue }
-                if st.isDir {
-                    stack.append(p)
-                } else if st.isLink {
-                    if !(statOf(p)?.isDir ?? false) { visit(p, true) }
-                } else {
-                    visit(p, false)
-                }
+                guard let st = lstatOf(p) else { throw Refused("the model cache changed during inspection") }
+                if st.isDir { stack.append(p) }
+                else if st.isLink || st.isFile { try visit(p, st.isLink) }
             }
         }
     }
@@ -147,35 +148,42 @@ enum Report {
         name.range(of: #"^(models|datasets|spaces)--[A-Za-z0-9._\-]+\z"#, options: .regularExpression) != nil
     }
 
-    /// Hugging Face hub layout: each repo folder links into a shared, content-addressed blob store
-    /// at <hub>/blobs. Returns ({repo folder: shared blobs it links to}, store path).
-    static func hfLinks(_ hub: String) -> (links: [String: Set<String>], shared: String) {
+    static func hfLinks(_ hub: String) throws -> (links: [String: Set<String>], shared: String) {
         let shared = hub + "/blobs"
-        let repos = (listNames(hub) ?? []).filter { n in isHFRepo(n) && (lstatOf(hub + "/" + n)?.isDir ?? false) }.map { hub + "/" + $0 }
-        let targets = parallelMap(repos) { repo -> Set<String> in
+        guard realPath(hub) == hub, let names = listNames(hub) else { throw Refused("cannot fully inspect the model cache") }
+        var links: [String: Set<String>] = [:]
+        for name in names where isHFRepo(name) {
+            let repo = hub + "/" + name
+            guard realPath(repo) == repo, lstatOf(repo)?.isDir == true else { throw Refused("cannot inspect a linked model folder") }
             var found = Set<String>()
             for sub in ["blobs", "snapshots"] {
-                filesUnder(repo + "/" + sub) { p, link in
-                    if link, let t = realPath(p), t.hasPrefix(shared + "/") { found.insert(t) }
+                try filesUnder(repo + "/" + sub) { p, link in
+                    if link {
+                        guard let t = realPath(p) else {
+                            if errno == ENOENT { return }  // a missing blob cannot keep an existing file alive
+                            throw Refused("cannot resolve model cache link " + p)
+                        }
+                        guard lstatOf(t)?.isFile == true else { throw Refused("cannot inspect model cache link " + p) }
+                        if t.hasPrefix(shared + "/") { found.insert(t) }
+                    }
                 }
             }
-            return found
+            links[repo] = found
         }
-        return (Dictionary(uniqueKeysWithValues: zip(repos, targets)), shared)
+        return (links, shared)
     }
 
-    /// Files in the shared blob store that no repo links to any more.
-    static func hfOrphans(_ links: [String: Set<String>], shared: String) -> [String] {
+    static func hfOrphans(_ links: [String: Set<String>], shared: String) throws -> [String] {
         let used = links.values.reduce(into: Set<String>()) { $0.formUnion($1) }
         var out: [String] = []
-        filesUnder(shared) { p, link in
+        try filesUnder(shared) { p, link in
             if !link, !used.contains(p) { out.append(p) }
         }
-        return out
+        return out.sorted()
     }
 
     static func hfItems(_ hub: String, core: ScanCore, env: Env, itemMin: Int64) -> [RuleItem] {
-        let (links, shared) = hfLinks(hub)
+        guard let (links, shared) = try? hfLinks(hub) else { return [] }
         var owners: [String: Int] = [:]
         for ts in links.values { for t in ts { owners[t, default: 0] += 1 } }
         var items = parallelMap(links.sorted(by: { $0.key < $1.key })) { repo, ts -> RuleItem in
@@ -205,7 +213,7 @@ enum Report {
             }
             return item
         }
-        let orphans = hfOrphans(links, shared: shared)
+        let orphans = (try? hfOrphans(links, shared: shared)) ?? []
         var b: Int64 = 0, back: Int64 = 0
         for p in orphans {
             guard let st = lstatOf(p) else { continue }
@@ -321,12 +329,20 @@ enum Report {
         var found = Set<String>()
         for pat in Rules.itemLevels[key] ?? [] { found.formUnion(glob(path, pat)) }
         let sorted = found.sorted()
+        var ancestors = Set<String>()
+        for item in sorted {
+            var ancestor = parentPath(item)
+            while ancestor.hasPrefix(path + "/") {
+                if !ancestors.insert(ancestor).inserted { break }
+                ancestor = parentPath(ancestor)
+            }
+        }
         var picked: [(path: String, dir: Bool, bytes: Int64, back: Int64?)] = []
         for p in sorted {
             let name = lastComponent(p)
             guard let st = lstatOf(p), !st.isLink, !name.hasPrefix("."), name != "CACHEDIR.TAG" else { continue }
             if hubs.contains(parentPath(p)), isHFRepo(name) || name == "blobs" { continue }      // handled by hfItems
-            if sorted.contains(where: { $0.hasPrefix(p + "/") }) { continue }                    // a parent of other items, not an item itself
+            if ancestors.contains(p) { continue }                    // a parent of other items, not an item itself
             let b: Int64, back: Int64?
             if st.isDir {
                 b = core.sizes[p] ?? 0
@@ -361,41 +377,94 @@ enum Report {
 
     // MARK: - Duplicates, apps, downloads
 
-    /// Files of the same length whose content samples match. Only the user's own, visible folders:
-    /// caches, app data and package stores hold deliberate copies that are not worth flagging.
-    static func findDupes(_ big: [BigRec], stripRoot: String, env: Env) -> [DupeGroup] {
-        var bySize: [Int64: [BigRec]] = [:]
+    /// Only read local regular files still matching the scan. Keep memory bounded for large media.
+    private static func fingerprint(_ f: BigRec, prefix: String, full: Bool, progress: ScanProgress) -> SHA256.Digest? {
+        let path = prefix + f.path
+        guard let initial = lstatOf(path), initial.isFile, initial.st_flags & SF_DATALESS_FLAG == 0 else { return nil }
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { return nil }
+        let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var before = stat(), after = stat()
+        guard fstat(fd, &before) == 0, before.isFile, before.st_flags & SF_DATALESS_FLAG == 0,
+              before.st_ino == f.ino, before.st_size == f.length, before.st_mtimespec.tv_sec == f.mtime else { return nil }
+        var sha = SHA256()
+        do {
+            if full {
+                var left = f.length
+                while left > 0 {
+                    guard !progress.cancelled, let data = try h.read(upToCount: Int(min(left, 2 * MB))), !data.isEmpty else { return nil }
+                    sha.update(data: data)
+                    left -= Int64(data.count)
+                }
+            } else {
+                let offsets = f.length > 4 * MB ? [0, f.length / 2, f.length - MB] : [0]
+                for offset in offsets {
+                    try h.seek(toOffset: UInt64(offset))
+                    guard let data = try h.read(upToCount: Int(MB)) else { return nil }
+                    sha.update(data: data)
+                }
+            }
+        } catch { return nil }
+        guard fstat(fd, &after) == 0, after.st_size == before.st_size,
+              after.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec,
+              after.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec else { return nil }
+        return sha.finalize()
+    }
+
+    /// The retained copy must still match the selected file when a duplicate action is reviewed or run.
+    static func copiesStillMatch(_ first: String, _ second: String) -> Bool {
+        func record(_ path: String) -> BigRec? {
+            guard let st = lstatOf(path), st.isFile, st.st_flags & SF_DATALESS_FLAG == 0 else { return nil }
+            return BigRec(bytes: st.allocated, path: path, mtime: Int64(st.mtime), length: st.st_size,
+                          ino: st.st_ino, opaque: false, ext: "", priv: 0)
+        }
+        guard let a = record(first), let b = record(second), a.length == b.length, a.ino != b.ino else { return false }
+        let progress = ScanProgress()
+        guard let digest = fingerprint(a, prefix: "", full: true, progress: progress) else { return false }
+        return fingerprint(b, prefix: "", full: true, progress: progress) == digest
+    }
+
+    /// Size and sample hashes shortlist candidates. Only a full content digest confirms a group.
+    static func findDupes(_ big: [BigRec], stripRoot: String, env: Env, progress: ScanProgress, fullReadBudget: Int64 = 4 * GB) -> [DupeGroup] {
         let own = env.home + "/"
-        for f in big {
-            guard f.path.hasPrefix(own), !f.opaque, f.bytes > 0 else { continue }
+        let files = big.filter { f in
+            guard f.path.hasPrefix(own), !f.opaque, f.bytes > 0 else { return false }
             let rel = f.path.dropFirst(own.count)
-            if rel.hasPrefix(".") || Rules.noTagHome.contains(String(rel.split(separator: "/").first ?? "")) { continue }
-            bySize[f.length, default: []].append(f)
+            return !rel.hasPrefix(".") && !Rules.noTagHome.contains(String(rel.split(separator: "/").first ?? ""))
         }
         var groups: [DupeGroup] = []
-        for (length, files) in bySize where files.count > 1 {
-            var byHash: [String: [UInt64: BigRec]] = [:]
-            for f in files {
-                guard let h = FileHandle(forReadingAtPath: stripRoot + f.path) else { continue }
-                defer { try? h.close() }
-                var sha = SHA256()
-                guard let head = try? h.read(upToCount: Int(2 * MB)) else { continue }
-                sha.update(data: head)
-                if length > 4 * MB {
-                    guard (try? h.seek(toOffset: UInt64(length / 2))) != nil, let mid = try? h.read(upToCount: Int(MB)),
-                          (try? h.seek(toOffset: UInt64(length - 2 * MB))) != nil, let tail = try? h.read(upToCount: Int(2 * MB)) else { continue }
-                    sha.update(data: mid)
-                    sha.update(data: tail)
-                }
-                byHash[sha.finalize().map { String(format: "%02x", $0) }.joined(), default: [:]][f.ino] = f
+        // A matching pair of multi-terabyte media files must not turn a routine scan into a full read.
+        var remaining = fullReadBudget
+        func append(_ peers: [BigRec], verified: Bool) {
+            let items = peers.sorted { ($0.mtime, $0.path) < ($1.mtime, $1.path) }
+            groups.append(DupeGroup(bytes: items[0].bytes, files: items.map {
+                DupeGroup.Copy(path: env.disp($0.path), mtime: Double($0.mtime), frees: $0.priv)
+            }, verified: verified))
+        }
+        let sizes = Dictionary(grouping: files, by: \.length)
+        for length in sizes.keys.sorted() {
+            guard let peers = sizes[length], peers.count > 1 else { continue }
+            var samples: [SHA256.Digest: [BigRec]] = [:]
+            for f in peers.sorted(by: { $0.path < $1.path }) {
+                if progress.cancelled { return [] }
+                if let key = fingerprint(f, prefix: stripRoot, full: false, progress: progress) { samples[key, default: []].append(f) }
             }
-            for same in byHash.values where same.count > 1 {
-                let items = same.values.sorted { $0.mtime != $1.mtime ? $0.mtime < $1.mtime : $0.path < $1.path }
-                groups.append(DupeGroup(bytes: items[0].bytes, files: items.map { DupeGroup.Copy(path: env.disp($0.path), mtime: Double($0.mtime)) }))
+            for matches in samples.values.sorted(by: { ($0.first?.path ?? "") < ($1.first?.path ?? "") }) where matches.count > 1 {
+                if length > remaining / Int64(matches.count) {
+                    append(matches, verified: false)
+                    continue
+                }
+                remaining -= length * Int64(matches.count)
+                var exact: [SHA256.Digest: [UInt64: BigRec]] = [:]
+                for f in matches {
+                    if let key = fingerprint(f, prefix: stripRoot, full: true, progress: progress) { exact[key, default: [:]][f.ino] = f }
+                }
+                for same in exact.values where same.count > 1 {
+                    append(Array(same.values), verified: true)
+                }
             }
         }
-        func waste(_ g: DupeGroup) -> Int64 { g.bytes * Int64(g.files.count - 1) }
-        return Array(groups.sorted { waste($0) != waste($1) ? waste($0) > waste($1) : $0.files[0].path < $1.files[0].path }.prefix(60))
+        return Array(groups.sorted { $0.extraBytes != $1.extraBytes ? $0.extraBytes > $1.extraBytes : $0.files[0].path < $1.files[0].path }.prefix(60))
     }
 
     /// (bundle id, name) from an app's Info.plist. Either is nil when missing or oddly formed.
@@ -444,17 +513,18 @@ enum Report {
         return out
     }
 
-    static func appList(_ core: ScanCore, env: Env) -> [AppInfo] {
+    static func appList(_ core: ScanCore, env: Env, root: String) -> [AppInfo] {
         let shared = sharedAppNames(env)
         var apps: [AppInfo] = []
-        for base in env.appDirs {
+        func inScope(_ path: String) -> Bool { root == "/" || path == root || path.hasPrefix(root + "/") }
+        for base in env.appDirs where inScope(base) {
             for n in listNames(base) ?? [] where n.hasSuffix(".app") {
                 let p = base + "/" + n
                 let bytes = core.sizes[p] ?? 0
                 var a = AppInfo(name: String(n.dropLast(4)), path: env.disp(p), bytes: bytes, frees: withFrees(bytes, core.frees(p)))
                 a.bundleId = appIdentity(p).id
                 var left: [AppInfo.Leftover] = []
-                for lp in appLeftovers(p, shared: shared, env: env) {
+                for lp in appLeftovers(p, shared: shared, env: env) where inScope(lp) {
                     guard let st = lstatOf(lp) else { continue }
                     if st.isDir {
                         let b = core.sizes[lp] ?? 0
@@ -531,25 +601,26 @@ enum Report {
         }
     }
 
+    private static let historyLock = NSLock()
+
     /// Appends one free-space reading to history.json. Numbers only, no paths.
     @discardableResult
     static func addHistory(_ env: Env, _ sample: Sample, minGap: Double = 0) -> [Sample] {
+        historyLock.lock()
+        defer { historyLock.unlock() }
         var hist = readHistory(env)
         if minGap > 0, let last = hist.last, sample.t - last.t < minGap { return hist }
-        hist = Array((hist + [sample]).suffix(1500))
+        if let last = hist.last, last.t == sample.t {
+            if last.scan == nil || sample.scan != nil { hist[hist.count - 1] = sample }
+        } else { hist = Array((hist + [sample]).suffix(1500)) }
         guard let data = try? JSONEncoder().encode(hist) else { return hist }
-        let tmp = env.historyPath + ".tmp"
-        let fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o600)     // never write through a link left at the temp name
-        guard fd >= 0 else { return hist }
-        let ok = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) == $0.count }
-        close(fd)
-        if ok { rename(tmp, env.historyPath) }
+        try? data.write(to: URL(fileURLWithPath: env.historyPath), options: .atomic)
         return hist
     }
 
     static func diskNumbers(_ opts: ScanOptions) -> (total: Int64, free: Int64) {
         var sv = statvfs()
-        let target = isDirectory(opts.dataRoot) ? opts.dataRoot : "/"
+        let target = opts.root
         guard statvfs(target, &sv) == 0 else { return (0, 0) }
         return (Int64(sv.f_blocks) * Int64(sv.f_frsize), Int64(sv.f_bavail) * Int64(sv.f_frsize))
     }
@@ -577,6 +648,12 @@ enum Report {
     /// Scans, builds every report, compares with the scan it replaces, and writes scan.json.
     /// Returns nil if cancelled; throws if the result cannot be written.
     static func run(_ opts: ScanOptions, env: Env, progress: ScanProgress, write: Bool = true) throws -> Scan? {
+        if write, [env.historyPath, env.logPath].contains(where: { $0.caseInsensitiveCompare(env.scanPath) == .orderedSame }) {
+            throw EngineError("Choose a scan output filename different from the history and action log.")
+        }
+        guard let rootStat = lstatOf(opts.root), rootStat.isDir, rootStat.st_flags & SF_DATALESS_FLAG == 0 else {
+            throw EngineError("The scan root must be an available local directory.")
+        }
         let started = Date()
         var mark = Date()
         func lap(_ what: String) {      // HEADROOM_TIMING=1 prints how long each part took
@@ -586,6 +663,8 @@ enum Report {
             mark = Date()
         }
         guard let core = Scanner.walk(opts, env: env, progress: progress) else { return nil }
+        guard !progress.cancelled else { return nil }
+        guard core.dirs > 0 || core.denied.isEmpty else { throw EngineError("The scan root could not be read.") }
         lap("walk and add up")
         progress.set(phase: "Finding leftovers, duplicates and what changed")
         let root = opts.root
@@ -637,12 +716,17 @@ enum Report {
             switch part {
             case 0: rules = buildRules(core, env: env, opts: opts)
             case 1:
-                dupes = findDupes(core.big, stripRoot: stripRoot, env: env)
+                dupes = findDupes(core.big, stripRoot: stripRoot, env: env, progress: progress)
             default:
-                downloadList = downloads(core, env: env, minBytes: opts.ruleMin / 10)
-                apps = appList(core, env: env)
+                if whole || root == env.home || (env.home + "/Downloads").hasPrefix(root + "/") || root == env.home + "/Downloads" {
+                    downloadList = downloads(core, env: env, minBytes: opts.ruleMin / 10)
+                }
+                if whole || root == env.home || env.appDirs.contains(where: { $0 == root || $0.hasPrefix(root + "/") }) {
+                    apps = appList(core, env: env, root: logicalRoot)
+                }
             }
         }
+        guard !progress.cancelled else { return nil }
         lap("rules and items, duplicates, downloads and apps")
         var scan = Scan(scannedAt: Date().timeIntervalSince1970.rounded(.down), seconds: 0,
                         os: "macOS \(v.majorVersion).\(v.minorVersion)" + (v.patchVersion > 0 ? ".\(v.patchVersion)" : ""),
@@ -665,16 +749,15 @@ enum Report {
 
         if let prev = loadScan(env.scanPath), prev.root == scan.root {      // compare with the scan this one replaces
             scan.changes = Changes(since: prev.scannedAt, freeThen: prev.disk.free, items: diffTrees(old: prev.tree, new: scan.tree, root: scan.root, minChange: opts.minNode * 5 / 4))
-            if whole, readHistory(env).isEmpty {
-                addHistory(env, Sample(t: prev.scannedAt, free: prev.disk.free, total: prev.disk.total, scan: 1))
-            }
+
         }
         lap("changes")
         scan.seconds = (Date().timeIntervalSince(started) * 10).rounded() / 10
         if write {
-            if whole { addHistory(env, Sample(t: scan.scannedAt, free: numbers.free, total: numbers.total, scan: 1)) }
             let data = try JSONEncoder().encode(scan)
+            guard !progress.cancelled else { return nil }
             try data.write(to: URL(fileURLWithPath: env.scanPath), options: .atomic)
+            if whole { addHistory(env, Sample(t: scan.scannedAt, free: numbers.free, total: numbers.total, scan: 1)) }
         }
         return scan
     }

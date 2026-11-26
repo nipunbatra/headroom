@@ -49,6 +49,8 @@ struct Candidate: Identifiable {
     var safety: String
     var perm = false
     var child = false
+    var supportOptions: [AppInfo.Leftover] = []
+    var selectedSupport: Set<String> { id.hasPrefix("app:") ? Set(paths.dropFirst()) : [] }
 }
 
 struct Totals {
@@ -86,15 +88,13 @@ struct TagInfo {
         case ok(String)
         case failed(String)
     }
-    enum TrashState: Equatable {
-        case idle, emptying
-        case emptied(String)
-        case failed
-    }
-
     let id = UUID()
     var items: [Candidate]
     var dry: [String: String] = [:]
+    var previews: [String: [ReviewedStep]] = [:]
+    var previewRevision = 0
+    var checkedHard: Bool?
+    var ready: Bool { checkedHard == hard && dry.count + blocked.count == items.count }
     var blocked: [String: String] = [:]     // id -> why the helper refuses it
     var marks: [String: Mark] = [:]
     var hard = false
@@ -107,7 +107,6 @@ struct TagInfo {
     var failed = 0
     var trashed = 0
     var stopRequested = false
-    var trash = TrashState.idle
 
     init(items: [Candidate]) { self.items = items }
 }
@@ -115,7 +114,16 @@ struct TagInfo {
 @MainActor @Observable final class AppModel {
     static let shared = AppModel()
 
-    let engine = Engine()
+    let engine: Engine
+    private let defaults: UserDefaults
+    private var skippedPathsByRule: [String: [String]]
+    var skippedRules: Set<String> { Set(skippedPathsByRule.keys) }
+
+    init(engine: Engine = Engine(), defaults: UserDefaults = .standard) {
+        self.engine = engine
+        self.defaults = defaults
+        skippedPathsByRule = defaults.dictionary(forKey: "quickCleanupSkippedRules") as? [String: [String]] ?? [:]
+    }
     var phase = Phase.starting
     var scan: Scan?
     var now: Double = Date().timeIntervalSince1970
@@ -129,6 +137,8 @@ struct TagInfo {
     var mapNode: Node?
     var group = "all"
     var kind = "all"
+    var minimumFileSize = FileSizeFilter.any
+    var modifiedBefore = FileAgeFilter.any
     var tag = "all"
 
     var plan: [String] = []
@@ -144,6 +154,7 @@ struct TagInfo {
     var scanFraction: Double = 0
     var scanning = false
     var scanError: String?
+    var focus = ReviewFocus.all
     var sort = "size"
     var scanPath = ""
     var scanRate = 0
@@ -168,6 +179,7 @@ struct TagInfo {
         "toolcache": TagInfo(label: "Tool cache", rebuild: true, how: "rebuilt on the next run"),
         "pods": TagInfo(label: "CocoaPods", rebuild: true, how: "pod install brings it back"),
         "venv": TagInfo(label: "Python environment", rebuild: false, how: "recreate from requirements or pyproject"),
+        "notebook-checkpoints": TagInfo(label: "Notebook checkpoints", rebuild: false, how: "May contain an earlier notebook revision"),
         "ml-logs": TagInfo(label: "Experiment logs", rebuild: false, how: "runs, metrics and checkpoints; gone once deleted"),
         "git": TagInfo(label: "Git history", rebuild: false, how: "shrink with git gc --aggressive; never delete"),
     ]
@@ -201,7 +213,28 @@ struct TagInfo {
         }
     }
 
-    private func install(_ scan: Scan) {
+    func install(_ snapshot: Scan) {
+        var scan = snapshot
+        // Stored reports predate rule changes. Apply current policy before offering any actions.
+        let definitions = Dictionary(uniqueKeysWithValues: Report.allRules(engine.env).map { ($0.id, $0) })
+        if let found = scan.found {
+            scan.found = found.map { item in
+                var item = item
+                if item.tag == "toolcache", lastComponent(item.path) == ".ipynb_checkpoints" { item.tag = "notebook-checkpoints" }
+                return item
+            }
+        }
+        for i in scan.rules.indices {
+            if let def = definitions[scan.rules[i].id] {
+                scan.rules[i].safety = def.safety
+                scan.rules[i].cmd = def.cmd
+                scan.rules[i].why = def.why
+                scan.rules[i].title = def.title
+            } else if scan.rules[i].id == "pycache" {
+                scan.rules[i].safety = "review"
+                scan.rules[i].cmd = "@manual"
+            }
+        }
         let ticked = plan           // a fresh scan keeps the cleanup list, minus anything that is gone
         self.scan = scan
         now = scan.scannedAt
@@ -233,29 +266,32 @@ struct TagInfo {
                               safety: r.safety, perm: r.perm ?? false, child: true))
             }
         }
-        for f in scan.found ?? [] where f.tag != "git" {
+        for f in scan.found ?? [] where f.tag != "git" && Self.pickableFile(f.path) {
             add(Candidate(id: "file:" + f.path, title: tagLabel(f.tag) + " in " + project(f), bytes: f.returns,
                           paths: [f.path], safety: foundSafety(f)))
         }
-        for f in scan.bigFiles ?? [] where AppModel.pickable(f.path) {
+        for f in scan.bigFiles ?? [] where Self.pickableFile(f.path) {
             add(Candidate(id: "file:" + f.path, title: baseName(f.path), bytes: f.returns, paths: [f.path], safety: "review"))
         }
         for g in scan.dupes ?? [] {
-            for f in g.files where AppModel.pickable(f.path) {
-                add(Candidate(id: "file:" + f.path, title: baseName(f.path), bytes: g.bytes, paths: [f.path], safety: "review"))
+            for f in g.files.dropFirst() where Self.pickableFile(f.path) {
+                add(Candidate(id: "duplicate:" + f.path, title: baseName(f.path), bytes: f.frees ?? g.bytes, paths: [f.path], safety: "review"))
+            }
+            for f in g.files where Self.pickableFile(f.path) {
+                add(Candidate(id: "file:" + f.path, title: baseName(f.path), bytes: f.frees ?? g.bytes, paths: [f.path], safety: "review"))
             }
         }
         for f in scan.downloads ?? [] {
             add(Candidate(id: "file:" + f.path, title: f.name, bytes: f.returns, paths: [f.path], safety: "review"))
         }
         for a in scan.apps ?? [] where AppModel.pickable(a.path) && a.bytes > 0 {
-            add(Candidate(id: "app:" + a.path, title: a.name + " (app)", bytes: a.returns + a.leftoverBytes,
-                          paths: [a.path] + (a.leftovers ?? []).map(\.path), safety: "review"))
+            add(Candidate(id: "app:" + a.path, title: a.name + " (app)", bytes: a.returns,
+                          paths: [a.path], safety: "review", supportOptions: a.leftovers ?? []))
             for l in a.leftovers ?? [] where AppModel.pickable(l.path) {
                 add(Candidate(id: "file:" + l.path, title: baseName(l.path), bytes: l.returns, paths: [l.path], safety: "review"))
             }
         }
-        for (p, n) in nodes where AppModel.pickable(p) {
+        for (p, n) in nodes where Self.pickableFile(p) {
             add(Candidate(id: "file:" + p, title: n.n, bytes: n.returns, paths: [p], safety: "review"))
         }
         restoreState()
@@ -263,12 +299,15 @@ struct TagInfo {
         compute()
     }
 
-    /// Must stay in step with user_path_ok() in scan.py, which checks again before deleting.
+    static func pickableFile(_ p: String) -> Bool { pickable(p) && !Cleaner.insideInstalledApp(p) }
+
+    /// Lexical eligibility for the UI. The cleaner also checks the live filesystem.
     static func pickable(_ p: String) -> Bool {
-        if p.hasSuffix("/.git") || p.contains("/.git/") { return false }
+        let path = p.hasPrefix("~/") ? String(p.dropFirst()) : p
+        guard isNormal(path), !(path.lowercased() + "/").contains("/.git/") else { return false }
         if !p.hasPrefix("~/") { return p.range(of: #"^/Applications/[^/\n]+\.app\z"#, options: .regularExpression) != nil }
         let seg = p.split(separator: "/", omittingEmptySubsequences: false)
-        if seg.count > 1, seg[1] == "Library" { return seg.count >= 4 }
+        if seg.count > 1, seg[1].lowercased() == "library" { return seg.count >= 4 }
         return seg.count >= 3
     }
 
@@ -282,7 +321,7 @@ struct TagInfo {
     func age(_ ts: Double?) -> String { ageText(ts, now: now) }
     func tagLabel(_ tag: String) -> String { AppModel.tags[tag]?.label ?? tag }
     func project(_ f: Found) -> String { baseName(dirName(f.path)) }
-    func stale(_ f: Found) -> Bool { days(f.projectMtime) > 90 }
+    func stale(_ f: Found) -> Bool { (f.projectMtime ?? 0) > 0 && days(f.projectMtime) > 90 }
     func foundSafety(_ f: Found) -> String { (AppModel.tags[f.tag]?.rebuild ?? false) && stale(f) ? "safe" : "review" }
 
     /// What is still left in a rule after the items cleaned from it since the scan.
@@ -302,7 +341,7 @@ struct TagInfo {
         var t = Totals()
         t.staleFound = stale.filter { !inside($0.path, "safe") }
         let staleInReview = stale.filter { inside($0.path, "review") }.reduce(0) { $0 + $1.returns }
-        let reviewFound = found.filter { ($0.tag == "venv" || $0.tag == "ml-logs") && foundSafety($0) != "safe" && !inside($0.path, nil) }
+        let reviewFound = found.filter { ["venv", "ml-logs", "notebook-checkpoints"].contains($0.tag) && foundSafety($0) != "safe" && !inside($0.path, nil) }
         t.safe = rules.filter { $0.safety == "safe" }.reduce(0) { $0 + left($1) } + t.staleFound.reduce(0) { $0 + $1.returns }
         t.review = max(0, rules.filter { $0.safety == "review" }.reduce(0) { $0 + left($1) } + reviewFound.reduce(0) { $0 + $1.returns } - staleInReview)
         let total = self.total > 0 ? self.total : scan.disk.total
@@ -314,8 +353,32 @@ struct TagInfo {
         totals = t
     }
 
+    var quickRules: [Candidate] {
+        candidates.values.filter { $0.safety == "safe" && $0.id.hasPrefix("rule:") }
+            .sorted { ($0.title, $0.id) < ($1.title, $1.id) }
+    }
+
+    func includeInQuickCleanup(_ id: String, _ include: Bool) {
+        if include { skippedPathsByRule[id] = nil }
+        else if let rule = quickRules.first(where: { $0.id == id }) { skippedPathsByRule[id] = rule.paths }
+        defaults.set(skippedPathsByRule, forKey: "quickCleanupSkippedRules")
+    }
+
     var safeItems: [Candidate] {
-        candidates.values.filter { $0.safety == "safe" && !$0.child }.sorted { $0.bytes > $1.bytes }
+        let rules = quickRules
+        let paths = rules.flatMap(\.paths)
+        let skippedPaths = skippedPathsByRule.values.flatMap { $0 } + rules.filter { skippedRules.contains($0.id) }.flatMap(\.paths)
+        let included = rules.filter { candidate in
+            !skippedRules.contains(candidate.id) && !candidate.paths.contains { path in
+                skippedPaths.contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
+            }
+        }
+        let projects = totals.staleFound.compactMap { candidates["file:" + $0.path] }.filter { candidate in
+            !candidate.paths.contains { path in
+                (paths + skippedPaths).contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
+            }
+        }
+        return (included + projects).sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.id < $1.id }
     }
 
     /// The sum of several items, counting a folder inside another one once.
@@ -379,13 +442,13 @@ struct TagInfo {
 
     func saveState() {
         guard let scan else { return }
-        UserDefaults.standard.set(["at": scan.scannedAt, "plan": plan, "cleared": Array(cleared)] as [String: Any], forKey: stateKey)
+        defaults.set(["at": scan.scannedAt, "plan": plan, "cleared": Array(cleared)] as [String: Any], forKey: stateKey)
     }
 
     private func restoreState() {
         plan = []
         cleared = []
-        guard let scan, let s = UserDefaults.standard.dictionary(forKey: stateKey),
+        guard let scan, let s = defaults.dictionary(forKey: stateKey),
               (s["at"] as? Double) == scan.scannedAt else { return }
         for id in s["cleared"] as? [String] ?? [] {
             cleared.insert(id)
@@ -397,7 +460,7 @@ struct TagInfo {
     // MARK: - Cleaning
 
     func review(_ ids: [String]) {
-        if let s = session, s.stage == .running { return }
+        guard session == nil else { return }
         var seen = Set<String>()
         let items = ids.filter { seen.insert($0).inserted }.compactMap { candidates[$0] }.sorted { $0.bytes > $1.bytes }
         guard !items.isEmpty else { return }
@@ -407,20 +470,44 @@ struct TagInfo {
 
     func reviewSafe() { review(safeItems.map(\.id)) }
 
+    func selectSupport(_ path: String, for id: String, include: Bool) {
+        guard let s = session, s.stage == .review, let base = candidates[id],
+              let index = s.items.firstIndex(where: { $0.id == id }),
+              base.supportOptions.contains(where: { $0.path == path }) else { return }
+        var selected = s.items[index].selectedSupport
+        if include { selected.insert(path) } else { selected.remove(path) }
+        let options = base.supportOptions.filter { selected.contains($0.path) }
+        s.items[index].paths = base.paths + options.map(\.path)
+        s.items[index].bytes = base.bytes + options.reduce(0) { $0 + $1.returns }
+        refreshDry()
+    }
+
     func refreshDry() {
         guard let s = session, s.stage == .review else { return }
-        let ids = s.items.map(\.id)
+        let items = s.items
         let hard = s.hard
+        s.previewRevision += 1
+        let revision = s.previewRevision
+        s.checkedHard = nil
+        s.dry = [:]
+        s.blocked = [:]
+        s.previews = [:]
         Task {
-            let results = await engine.dryRun(ids, hard: hard, scan: scan)
-            guard session === s else { return }
+            let results = await engine.dryRun(items, hard: hard, scan: scan)
+            guard session === s, s.stage == .review, s.hard == hard, s.previewRevision == revision else { return }
             var dry: [String: String] = [:]
             var blocked: [String: String] = [:]
             for r in results {
-                if r.ok { dry[r.id] = r.summary } else { blocked[r.id] = r.errors.joined(separator: "; ") }
+                if r.ok, let preview = r.preview, preview.isEmpty {
+                    blocked[r.id] = "Nothing remains to remove. Scan again to update its size."
+                } else if r.ok, let preview = r.preview {
+                    dry[r.id] = r.summary
+                    s.previews[r.id] = preview
+                } else { blocked[r.id] = r.errors.joined(separator: "; ") }
             }
             s.dry = dry
             s.blocked = blocked
+            s.checkedHard = hard
         }
     }
 
@@ -432,7 +519,7 @@ struct TagInfo {
     }
 
     func runClean() async {
-        guard let s = session, s.stage == .review else { return }
+        guard let s = session, s.stage == .review, s.ready, !scanning, !s.previews.isEmpty else { return }
         s.stage = .running
         s.startFree = free
         let rank = ["safe": 0, "review": 1, "keep": 2]
@@ -451,7 +538,8 @@ struct TagInfo {
             if s.stopRequested { break }
             s.current = i
             s.marks[it.id] = .working
-            let r = await engine.clean(it.id, hard: s.hard, scan: scan)
+            guard let reviewed = s.previews[it.id] else { continue }
+            let r = await engine.clean(it, hard: s.hard, scan: scan, reviewed: reviewed)
             if let f = r.free { free = f }
             s.trashed += r.trashed
             if r.ok {
@@ -486,19 +574,15 @@ struct TagInfo {
         plan.removeAll { gone.contains($0) }
     }
 
-    func emptyTrash() async {
-        guard let s = session else { return }
-        s.trash = .emptying
-        let r = await engine.clean("rule:trash", hard: false, scan: scan)
-        try? await Task.sleep(for: .seconds(1))
-        readVolume()
-        s.endFree = free
-        s.trash = r.ok ? .emptied(fmt(free)) : .failed
-        compute()
+    func reviewHomeTrash() {
+        guard let previous = session, previous.stage == .done, previous.trashed > 0 else { return }
+        let trash = Candidate(id: "rule:trash", title: "Home Trash", bytes: 0, paths: ["~/.Trash"], safety: "review")
+        session = CleanSession(items: [trash])
+        refreshDry()
     }
 
     func closeSession() {
-        if let s = session, s.stage == .running { return }
+        if session?.stage == .running { return }
         session = nil
     }
 
@@ -506,8 +590,7 @@ struct TagInfo {
 
     /// Measures the disk again. The current scan stays on screen until the new one is ready.
     func rescan() {
-        guard !scanning else { return }
-        if let s = session, s.stage == .running { return }
+        guard !scanning, session == nil else { return }
         expectedFiles = scan?.stats.files ?? 0
         progress = "Starting"
         scanFraction = 0
@@ -538,6 +621,10 @@ struct TagInfo {
                 if let result = try await engine.scan(progress: p) {
                     readVolume()
                     install(result)
+                    if let s = session, s.stage == .review {
+                        s.items = s.items.compactMap { candidates[$0.id] }
+                        if s.items.isEmpty { closeSession() } else { refreshDry() }
+                    }
                     phase = .ready
                     history = await engine.history(free: free, total: total)
                 } else if scan == nil {
@@ -567,14 +654,17 @@ struct TagInfo {
         expanded.insert(uid)
         guard let path, browse[path] == nil else { return }
         browse[path] = Browse()
+        let tree = scan?.tree
         Task {
             do {
                 let listing = try await engine.list(path)
+                guard scan?.tree === tree else { return }
                 browse[path] = Browse(loading: false, entries: listing.entries, rest: listing.rest)
-                for e in listing.entries where AppModel.pickable(e.path) && !cleared.contains("file:" + e.path) && candidates["file:" + e.path] == nil {
+                for e in listing.entries where Self.pickableFile(e.path) && !cleared.contains("file:" + e.path) && candidates["file:" + e.path] == nil {
                     candidates["file:" + e.path] = Candidate(id: "file:" + e.path, title: e.name, bytes: e.returns, paths: [e.path], safety: "review")
                 }
             } catch {
+                guard scan?.tree === tree else { return }
                 browse[path] = Browse(loading: false, error: error.localizedDescription)
             }
         }
@@ -600,10 +690,17 @@ struct TagInfo {
     func zoom(_ path: String) {
         guard let n = nodes[path] else { return }
         mapNode = n
-        page = .map
+        if page != .map { go(.map) }
     }
 
-    func go(_ page: Page) {
+    func go(_ page: Page, focus: ReviewFocus = .all) {
+        self.focus = focus
+        kind = "all"
+        minimumFileSize = .any
+        modifiedBefore = .any
+        tag = "all"
+        group = "all"
+        sort = "size"
         search = ""
         highlighted = []
         self.page = page

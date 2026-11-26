@@ -223,6 +223,7 @@ enum Scanner {
     static func classify(_ name: String, parent: String, path: String) -> String? {
         switch name {
         case "node_modules": return "node_modules"
+        case ".ipynb_checkpoints": return "notebook-checkpoints"
         case ".git": return "git"
         case "__pycache__": return "pycache"
         case ".venv", "venv", "env", ".env":
@@ -266,7 +267,7 @@ enum Scanner {
         let cloneLock = NSLock()
         var cloneCache: [CloneKey: (Int64?, Int?)] = [:]
         var asked = 0, reused = 0
-        let workers = max(1, opts.threads)
+        let workers = max(1, min(64, opts.threads))
         var locals = [Local](repeating: Local(), count: workers)
         progress.set(phase: "Measuring files")
 
@@ -323,7 +324,7 @@ enum Scanner {
                                 }
                                 if let p, p < e.bytes {
                                     pv = p
-                                    local.clones.append(CloneRec(cid: e.cloneID, node: node, shared: e.bytes - p, copies: copies))
+                                    if e.cloneID != 0 { local.clones.append(CloneRec(cid: e.cloneID, node: node, shared: e.bytes - p, copies: copies)) }
                                 }
                             }
                             total += e.bytes
@@ -341,7 +342,7 @@ enum Scanner {
                         } else if e.skip != .none {
                             if e.skip == .dataless { local.dataless += 1 }
                         } else {
-                            let dp = path + "/" + e.name
+                            let dp = (path == "/" ? "" : path) + "/" + e.name
                             var cOpaque = node.opaque, cTagok = node.tagok
                             var tag: String?
                             if atHome { cTagok = !(e.name.hasPrefix(".") || Rules.noTagHome.contains(e.name)) }
@@ -413,7 +414,7 @@ enum Scanner {
                     }
                 }
             }
-            for g in groups.values where g.seen >= 2 && (g.copies == nil || g.seen >= g.copies!) {
+            for g in groups.values where g.seen >= 2 && g.copies == g.seen {
                 var n: DirNode? = g.top     // a copy that lives where the scan did not reach keeps the space alive
                 while let d = n {
                     d.extra += g.shared

@@ -44,7 +44,7 @@ No Python, no helper process, no network.
   `HEADROOM_TIMING=1` prints how long each part of a scan took.
 - `HEADROOM_SNAPSHOT=<dir>` makes the app save a PNG of every page in light and dark and quit (it
   captures its own window, so no Screen Recording permission is needed). `HEADROOM_SELFTEST=<ids>`
-  cleans fixture ids through the real model code; it refuses ids that are not fixtures.
+  runs file IDs through the real model using the temporary home named by `HEADROOM_FIXTURE_HOME` and a fixture-local Trash.
 - `scan.py` and `index.html` are the first version (Python scanner and server, web UI). The app
   does not use or ship them. `scan.py` stays as the reference for the cross-check; `index.html`
   is the read-only snapshot viewer the claude.ai artifact shows, and reads the same `scan.json`.
@@ -61,11 +61,12 @@ No Python, no helper process, no network.
   `AppModel.pickable()` mirrors it for what the UI offers. Change both together, with a test.
 - Caches and rebuildable folders (`node_modules`, `target`, ...) are deleted outright; everything
   else goes to the Trash unless the user ticks "Delete immediately".
+- Home Trash is explicitly reviewed. Quick Cleanup also respects saved rule exclusions.
 - Three safety levels drive the UI: `safe`, `review`, `keep`. A rule `cmd` of `@manual` means
   "not automatable, handle in the owning app".
 - Paths in `scan.json` use `~` so a shared snapshot carries no account name.
 - Test deletion only inside a `Fixture` (a fake home under the temp folder), never on real data.
-  The app's self-test accepts only ids containing `_fixture` or `HeadroomFixture`.
+  The app’s self-test accepts `file:~/` IDs inside a `HeadroomFixture…` home directly under the system temporary directory.
 - Patterns that validate names end in `\z`, not `$`: `$` also matches before a trailing newline.
 
 ## Deeper views
@@ -87,7 +88,8 @@ No Python, no helper process, no network.
   already on disk is not growth. The result is `changes` in `scan.json`. `history.json` (numbers
   only) keeps free space per scan plus one reading every 3 hours.
 - `app:` ids uninstall an app. Only bundles directly in `/Applications` or `~/Applications` with a
-  real `Contents/Info.plist` qualify. `Report.appLeftovers()` adds paths from
+  real `Contents/Info.plist` qualify. The bundle is the default selection. Optional support
+  files must be explicitly selected and still matched at execution. `Report.appLeftovers()` finds paths from
   `Rules.leftoverSpots` that carry the app's bundle id (three parts or more) or exact name, pass
   `userPathOK()`, and are reached without a symlink. An id or name used by two installed apps, or
   a vendor folder name, is never matched. A running app is refused. All decided at delete time.
@@ -105,8 +107,8 @@ No Python, no helper process, no network.
   with the same clone id, sizes and modified time share an answer (`CloneKey`), which cut 1.6M
   calls to 0.55M with identical totals.
 - A clone group's shared bytes are credited to the deepest folder that holds every copy, and
-  only if the copies seen equal the copy count macOS reports. So `frees` for a folder is exact:
-  private bytes plus shared bytes of groups that live entirely inside it.
+  only if the copies seen equal the copy count macOS reports. The `frees` estimate uses
+  private bytes plus shared bytes of groups that appear to live entirely inside it.
 - JSON: `bytes` is size on disk, `frees` appears only when smaller. Tree nodes use `s` and `r`.
   `disk.unique` is the scanned total with shared space counted once.
 - Never walk a folder without the cloud-placeholder skip: listing a dataless folder makes macOS
@@ -118,7 +120,8 @@ No Python, no helper process, no network.
 ## Known gaps
 
 - Without Full Disk Access, `~/.Trash`, Mail, Messages and Photos internals are unreadable.
-- Ad-hoc signed, not notarised: fine on the Mac that built it, Gatekeeper will object elsewhere.
+- Local builds are ad-hoc signed by default. Set `HEADROOM_SIGN_IDENTITY` for Developer ID distribution.
+  The v0.4.0 GitHub download is Developer ID signed and lacks a notarization ticket.
 - Spotlight has no index on this disk, so app last-opened dates are missing.
 - Hard links are counted in whichever folder a worker reaches first, so which folder "owns" a
   hard-linked file can differ between scans; totals do not.

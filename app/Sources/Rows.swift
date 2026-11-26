@@ -2,6 +2,43 @@
 // so selection, context menus and cleaning behave the same everywhere.
 import SwiftUI
 
+enum FileSizeFilter: Int64, CaseIterable {
+    case any = 0, oneGB = 1000000000, fiveGB = 5000000000
+    var label: String { self == .any ? "Any size" : "\(rawValue / GB) GB or larger" }
+}
+
+enum FileAgeFilter: Int, CaseIterable {
+    case any = 0, threeMonths = 90, oneYear = 365
+    var label: String {
+        switch self {
+        case .any: return "Any date"
+        case .threeMonths: return "90+ days ago"
+        case .oneYear: return "1+ year ago"
+        }
+    }
+}
+
+enum ReviewFocus: String, Identifiable {
+    case all = "All items", installers = "Installers", older = "Over a year old"
+    case idle = "Idle builds", duplicates = "Duplicate groups"
+    var id: Self { self }
+
+    static func choices(for page: Page) -> [Self] {
+        switch page {
+        case .downloads: return [.all, .installers, .older]
+        case .projects: return [.all, .idle]
+        case .files: return [.all, .duplicates]
+        default: return []
+        }
+    }
+}
+
+extension Download {
+    var installer: Bool {
+        !dir && ["dmg", "pkg", "iso", "ipsw"].contains((name as NSString).pathExtension.lowercased())
+    }
+}
+
 struct BulkAction: Identifiable {
     var id: String
     var label: String
@@ -64,7 +101,7 @@ extension AppModel {
         case "newest": return rows.sorted { ($0.date ?? 0) > ($1.date ?? 0) }
         case "oldest": return rows.sorted { ($0.date ?? .infinity) < ($1.date ?? .infinity) }
         case "name": return rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        default: return rows
+        default: return rows.sorted { $0.bytes > $1.bytes }
         }
     }
 
@@ -187,18 +224,25 @@ extension AppModel {
                     "keep": "Large, but personal or managed by macOS. Shown so you know where the space went."]
         return ["safe", "review", "keep"].compactMap { k in
             let rs = list.filter { $0.safety == k }
-            guard !rs.isEmpty else { return nil }
-            var total = rs.filter { !cleared.contains($0.cleanID) }.reduce(0) { $0 + left($1) }
-            var ids = rs.filter(\.pickable).map(\.cleanID).filter { candidates[$0] != nil }
-            var rows = rs.map(ruleRow)
+            var rows = rs.map { ruleRow($0) }
             if k == "safe", group == "all" || group == "dev", let stale = staleRow() {
                 rows.append(stale)
                 rows.sort { $0.bytes > $1.bytes }
-                total += stale.bytes
+            }
+            rows = rows.flatMap { row -> [Row] in
+                if matches(row) { return [row] }
+                return row.children.filter { !$0.note && matches($0) }.map { child in
+                    var result = child
+                    result.pills.append(Pill(text: row.title))
+                    return result
+                }
+            }
+            guard !rows.isEmpty else { return nil }
+            let total = rows.filter { !isCleared($0) }.reduce(0) { $0 + $1.bytes }
+            var ids = rows.compactMap(\.cleanID).filter { candidates[$0] != nil }
+            if rows.contains(where: { $0.id == "x:stale" }) {
                 ids += totals.staleFound.map { "file:" + $0.path }.filter { candidates[$0] != nil }
             }
-            rows = rows.filter(matches)
-            guard !rows.isEmpty else { return nil }
             return RowSection(id: k, title: (AppModel.safetyTitle[k] ?? k) + " · " + fmt(total), subtitle: subs[k] ?? "", rows: rows,
                               bulk: k == "keep" || ids.isEmpty ? [] : [BulkAction(id: "rules-" + k, label: "Add All", ids: ids,
                                                                                  help: "Add every item in this group to the cleanup list")])
@@ -216,7 +260,7 @@ extension AppModel {
             return row
         }
         if let stale = staleRow() { rows.append(stale) }
-        return Array(rows.sorted { $0.bytes > $1.bytes }.prefix(7))
+        return Array(rows.filter { $0.cleanID != nil }.sorted { $0.bytes > $1.bytes }.prefix(5))
     }
 
     /// One line standing for every rebuildable folder in a project nobody has touched for 90 days.
@@ -299,9 +343,21 @@ extension AppModel {
         return seen
     }
 
+    var remainingDuplicateGroups: [DupeGroup] {
+        (scan?.dupes ?? []).compactMap { group in
+            guard let keeper = group.files.first, !cleared.contains("file:" + keeper.path) else { return nil }
+            var remaining = group
+            remaining.files = group.files.filter { !cleared.contains("duplicate:" + $0.path) && !cleared.contains("file:" + $0.path) }
+            return remaining.files.count > 1 ? remaining : nil
+        }
+    }
+
     func fileSections() -> [RowSection] {
         guard let scan else { return [] }
-        let files = (scan.bigFiles ?? []).filter { kind == "all" || $0.kind == kind }.map { f -> Row in
+        let files = (scan.bigFiles ?? []).filter { file in
+            (kind == "all" || file.kind == kind) && file.bytes >= minimumFileSize.rawValue
+                && (modifiedBefore == .any || (file.mtime > 0 && days(file.mtime) >= Double(modifiedBefore.rawValue)))
+        }.map { f -> Row in
             var r = Row(id: "file:" + f.path, cleanID: "file:" + f.path, title: baseName(f.path))
             r.pills = [Pill(text: f.kind)]
             r.path = dirName(f.path)
@@ -312,33 +368,36 @@ extension AppModel {
             r.reveal = f.path
             return r
         }.filter(matches)
-        var out = [RowSection(id: "files", title: "Large Files", subtitle: "The biggest single files on the disk. Files inside apps and package folders are left out.",
-                              rows: Array(ordered(files).prefix(300)), empty: "No files match.")]
-        let dupes = scan.dupes ?? []
-        guard !dupes.isEmpty, kind == "all" else { return out }
-        let wasted = dupes.reduce(Int64(0)) { $0 + $1.bytes * Int64($1.files.count - 1) }
-        let newer = dupes.flatMap { $0.files.dropFirst().map { "file:" + $0.path } }.filter { candidates[$0] != nil }
+        var out: [RowSection] = []
+        if focus != .duplicates {
+            let count = files.count > 300 ? "Showing the first 300 of \(files.count) matches." : plural(files.count, "matching file") + "."
+            out.append(RowSection(id: "files", title: "Large Files", subtitle: count + " Size filters use space on disk. Each row shows the estimated space you can recover.",
+                                  rows: Array(ordered(files).prefix(300)), empty: "No large files match."))
+        }
+        let dupes = remainingDuplicateGroups
+        if (kind != "all" || modifiedBefore != .any || minimumFileSize != .any) && focus != .duplicates { return out }
         let rows = dupes.enumerated().map { i, g -> Row in
             var r = Row(id: "dupe:\(i)", title: baseName(g.files[0].path))
             r.pills = [Pill(text: "\(g.files.count) copies")]
-            r.bytes = g.bytes
-            r.meta = "each"
+            r.bytes = g.extraBytes
+            r.meta = g.verified == true ? "full match at scan" : "sample match"
             r.startsOpen = true
             r.children = g.files.enumerated().map { j, f -> Row in
-                var c = Row(id: "file:" + f.path, cleanID: j == 0 ? nil : "file:" + f.path, title: baseName(f.path))
+                var c = Row(id: "file:" + f.path, cleanID: j == 0 ? nil : "duplicate:" + f.path, title: baseName(f.path))
                 c.pills = j == 0 ? [Pill(text: "Oldest copy", kind: .keep)] : []
                 c.path = dirName(f.path)
-                c.bytes = g.bytes
+                c.bytes = f.frees ?? g.bytes
                 c.meta = "changed " + age(f.mtime)
                 c.reveal = f.path
                 return c
             }
             return r
         }.filter { r in matches(r) || r.children.contains(where: matches) }
-        out.append(RowSection(id: "dupes", title: "Duplicates · " + fmt(wasted),
-                              subtitle: "Files of 50 MB or more in your own folders with identical size and matching content samples. Copies made in Finder can be clones that already share space.",
-                              rows: rows,
-                              bulk: newer.isEmpty ? [] : [BulkAction(id: "dupes", label: "Add Newer Copies", ids: newer, help: "Add every copy except the oldest to the cleanup list")]))
+        if !rows.isEmpty || focus == .duplicates {
+            out.append(RowSection(id: "dupes", title: "Duplicate groups",
+                                  subtitle: "Headroom compares the contents again before removing a copy. The oldest copy stays in place when cleaning from this group.",
+                                  rows: rows, empty: "No duplicate groups in this scan."))
+        }
         return out
     }
 
@@ -352,14 +411,13 @@ extension AppModel {
 
     func projectSections() -> [RowSection] {
         let all = scan?.found ?? []
-        let idle = all.filter { foundSafety($0) == "safe" }.map { "file:" + $0.path }.filter { candidates[$0] != nil }
-        let rows = all.filter { tag == "all" || $0.tag == tag }.map { f -> Row in
+        let rows = all.filter { (tag == "all" || $0.tag == tag) && (focus != .idle || foundSafety($0) == "safe") }.map { f -> Row in
             let info = AppModel.tags[f.tag]
             var r = Row(id: "file:" + f.path, cleanID: f.tag == "git" ? nil : "file:" + f.path, title: project(f))
             r.pills = [Pill(text: info?.label ?? f.tag)]
             if f.tag != "git" {
                 r.pills.append(foundSafety(f) == "safe" ? Pill(text: "Idle, Rebuildable", kind: .safe)
-                               : Pill(text: stale(f) ? "Idle" : "Active", kind: .review))
+                               : Pill(text: (f.projectMtime ?? 0) <= 0 ? "Activity unknown" : stale(f) ? "Idle" : "Recently changed", kind: .review))
             }
             r.why = info?.how ?? ""
             r.path = f.path
@@ -371,24 +429,28 @@ extension AppModel {
             r.browse = f.tag == "git" ? nil : f.path
             return r
         }.filter(matches)
+        let visible = Array(ordered(rows).prefix(300))
+        let idle = visible.compactMap(\.cleanID).filter { candidates[$0]?.safety == "safe" }
         return [RowSection(id: "projects", title: "Dependency and Build Folders",
                            subtitle: "Inside your own projects. Idle means nothing in the project changed for 90 days.",
-                           rows: Array(ordered(rows).prefix(300)),
+                           rows: visible,
                            bulk: idle.isEmpty ? [] : [BulkAction(id: "stale", label: "Add Idle Rebuildables", ids: idle, help: "Add rebuildable folders in idle projects to the cleanup list")],
-                           empty: "No project leftovers above 20 MB were found.")]
+                           empty: focus == .idle ? "No idle rebuildable folders match." : "No project folders match.")]
     }
 
     // MARK: - Downloads
 
     func downloadSections() -> [RowSection] {
         guard let dl = scan?.downloads else { return [] }
-        func installer(_ n: String) -> Bool { ["dmg", "pkg", "iso", "ipsw"].contains((n as NSString).pathExtension.lowercased()) }
-        let inst = dl.filter { installer($0.name) }.map { "file:" + $0.path }.filter { candidates[$0] != nil }
-        let old = dl.filter { days($0.mtime) > 365 }.map { "file:" + $0.path }.filter { candidates[$0] != nil }
-        var rows = dl.map { f -> Row in
+        let matching = dl.filter { f in
+            if focus == .installers { return f.installer }
+            if focus == .older { return f.mtime > 0 && days(f.mtime) > 365 }
+            return true
+        }
+        var rows = matching.map { f -> Row in
             var r = Row(id: "file:" + f.path, cleanID: "file:" + f.path, title: f.name)
             if f.dir { r.pills.append(Pill(text: "Folder")) }
-            if installer(f.name) { r.pills.append(Pill(text: "Installer", kind: .safe)) }
+            if f.installer { r.pills.append(Pill(text: "Installer")) }
             r.bytes = f.returns
             r.disk = f.bytes
             r.meta = "changed " + age(f.mtime)
@@ -398,7 +460,11 @@ extension AppModel {
             return r
         }.filter(matches)
         rows = ordered(rows)
-        if search.isEmpty {
+        let visible = Set(rows.compactMap(\.cleanID))
+        let eligible = matching.filter { visible.contains("file:" + $0.path) && candidates["file:" + $0.path] != nil }
+        let inst = eligible.filter(\.installer).map { "file:" + $0.path }
+        let old = eligible.filter { $0.mtime > 0 && days($0.mtime) > 365 }.map { "file:" + $0.path }
+        if search.isEmpty, focus == .all {
             var every = Row(id: "all-downloads", title: "Everything in Downloads")
             every.why = "The full listing, measured now, including items under 5 MB."
             every.path = "~/Downloads"
@@ -410,8 +476,8 @@ extension AppModel {
         var bulk: [BulkAction] = []
         if !inst.isEmpty { bulk.append(BulkAction(id: "dl-inst", label: "Add Installers", ids: inst, help: "Add disk images and installer packages to the cleanup list")) }
         if !old.isEmpty { bulk.append(BulkAction(id: "dl-old", label: "Add Older Than a Year", ids: old, help: "Add downloads untouched for a year to the cleanup list")) }
-        return [RowSection(id: "downloads", title: "Downloads", subtitle: "Items of 5 MB or more in ~/Downloads, largest first.",
-                           rows: rows, bulk: bulk, empty: "Nothing of 5 MB or more in Downloads.")]
+        return [RowSection(id: "downloads", title: "Downloads", subtitle: "Downloads of 5 MB or more. Age is based on the last modification.",
+                           rows: rows, bulk: bulk, empty: "No downloads match this view.")]
     }
 
     // MARK: - Applications
@@ -423,10 +489,9 @@ extension AppModel {
             var r = Row(id: "app:" + a.path, cleanID: AppModel.pickable(a.path) ? "app:" + a.path : nil, title: a.name)
             r.appPath = a.path
             r.path = a.path
-            r.bytes = a.returns + a.leftoverBytes
-            r.disk = a.bytes + left.reduce(0) { $0 + $1.bytes }
-            r.meta = left.isEmpty ? "" : a.leftoverBytes >= MB ? "app \(fmt(a.returns)) + \(fmt(a.leftoverBytes)) of support files"
-                                                              : "with \(plural(left.count, "support item"))"
+            r.bytes = a.returns
+            r.disk = a.bytes
+            r.meta = left.isEmpty ? "" : "\(fmt(a.leftoverBytes)) of optional support files"
             if let used = a.lastUsed {
                 r.meta += (r.meta.isEmpty ? "" : " · ") + "opened " + age(used)
                 r.date = used
@@ -444,9 +509,16 @@ extension AppModel {
                 return c
             }
             return r
-        }.filter(matches).sorted { $0.bytes > $1.bytes }
+        }.flatMap { row -> [Row] in
+            if matches(row) { return [row] }
+            return row.children.filter { matches($0) }.map { child in
+                var result = child
+                result.pills.append(Pill(text: row.title))
+                return result
+            }
+        }
         return [RowSection(id: "apps", title: "Applications",
-                           subtitle: "Cleaning an app also removes the support files it left in your Library, matched by the app's own identifier. Open a row to see them.",
+                           subtitle: "Select an app to uninstall its bundle. Its support files stay on your Mac unless you include them individually during review.",
                            rows: ordered(rows), empty: "No apps match.")]
     }
 }

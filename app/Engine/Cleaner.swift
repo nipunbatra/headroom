@@ -7,12 +7,73 @@
 //   * Caches and rebuildable folders are deleted outright. Everything else is moved to the Trash
 //     unless the person ticks "delete immediately".
 //   * Every action is appended to the action log.
+import CryptoKit
 import Foundation
 
 enum Step: Equatable {
     case run(String)
     case delete(String)
     case trash(String)
+}
+
+/// The targets the user saw, including filesystem identity for path-based actions.
+struct ReviewedStep: Equatable {
+    let step: Step
+    let inode: ino_t?
+    let device: dev_t?
+    let changedSeconds: Int?
+    let changedNanoseconds: Int?
+
+    let contents: SHA256.Digest?
+
+    init(_ step: Step) throws {
+        self.step = step
+        let st: stat?
+        switch step {
+        case .run: st = nil
+        case .delete(let path), .trash(let path):
+            let parent = parentPath(path)
+            guard realPath(parent) == parent, let parentStat = lstatOf(parent), let target = lstatOf(path),
+                  target.st_dev == parentStat.st_dev else { throw Refused("the target moved, is mounted, or has a linked parent") }
+            st = target
+        }
+        if case .delete(let path) = step, let st, st.isDir {
+            contents = try Self.directoryDigest(path, device: st.st_dev)
+        } else {
+            contents = nil
+        }
+        inode = st?.st_ino
+        device = st?.st_dev
+        changedSeconds = st?.st_ctimespec.tv_sec
+        changedNanoseconds = st?.st_ctimespec.tv_nsec
+    }
+    /// Verify the entire subtree before an irreversible recursive delete. Hash metadata without
+    /// reading file contents or following symlinks. Inaccessible and mounted directories fail closed.
+    private static func directoryDigest(_ root: String, device: dev_t) throws -> SHA256.Digest {
+        var hash = SHA256()
+        var stack = [root]
+        var buffer = Data()
+        while let directory = stack.popLast() {
+            guard let names = listNames(directory) else { throw Refused("cannot verify all contents of this folder") }
+            for name in names.sorted() {
+                let path = directory + "/" + name
+                guard let st = lstatOf(path), st.st_dev == device, st.st_flags & SF_DATALESS_FLAG == 0 else {
+                    throw Refused("a mounted, cloud-only, or changed item prevents permanent cleanup")
+                }
+                buffer.append(contentsOf: path.utf8)
+                buffer.append(0)
+                for value in [UInt64(st.st_ino), UInt64(st.st_mode), UInt64(bitPattern: Int64(st.st_ctimespec.tv_sec)),
+                              UInt64(st.st_ctimespec.tv_nsec)] {
+                    withUnsafeBytes(of: value) { buffer.append(contentsOf: $0) }
+                }
+                if buffer.count >= 65_536 { hash.update(data: buffer); buffer.removeAll(keepingCapacity: true) }
+                if st.isDir { stack.append(path) }
+            }
+        }
+        hash.update(data: buffer)
+        return hash.finalize()
+    }
+
 }
 
 final class Cleaner: @unchecked Sendable {
@@ -26,13 +87,20 @@ final class Cleaner: @unchecked Sendable {
     /// Must stay in step with AppModel.pickable(), which only decides what the UI offers.
     static func userPathOK(_ p: String, env: Env) -> Bool {
         guard p.hasPrefix("/"), isNormal(p) else { return false }
-        if (p + "/").contains("/.git/") { return false }
+        if (p.lowercased() + "/").contains("/.git/") { return false }
         if p.range(of: #"^/Applications/[^/\n]+\.app\z"#, options: .regularExpression) != nil { return true }
         guard p.hasPrefix(env.home + "/") else { return false }
         let seg = p.dropFirst(env.home.count + 1).split(separator: "/", omittingEmptySubsequences: false)
-        if seg.count < (seg[0] == "Library" ? 3 : 2) { return false }
+        if seg.count < (seg[0].lowercased() == "library" ? 3 : 2) { return false }
         guard let parent = realPath(parentPath(p)), let home = realPath(env.home) else { return false }
-        return parent == home || parent.hasPrefix(home + "/")
+        return parent == parentPath(p) && (parent == home || parent.hasPrefix(home + "/"))
+    }
+
+    static func insideInstalledApp(_ shown: String) -> Bool {
+        for base in ["/applications/", "~/applications/"] where shown.lowercased().hasPrefix(base) {
+            return shown.dropFirst(base.count).split(separator: "/").contains { $0.lowercased().hasSuffix(".app") }
+        }
+        return false
     }
 
     func inHome(_ p: String) -> Bool {
@@ -61,15 +129,16 @@ final class Cleaner: @unchecked Sendable {
     // MARK: - What an id means
 
     /// Turns an id into concrete steps. `scan` supplies the folder lists of cache rules.
-    func resolve(_ id: String, hard: Bool, scan: Scan?) throws -> [Step] {
+    func resolve(_ id: String, hard: Bool, scan: Scan?, selectedSupport: Set<String> = []) throws -> [Step] {
         if id.hasPrefix("rule:") {
             let rid = String(id.dropFirst(5))
-            if rid == "pycache" { return [.run(Rules.pycacheCommand)] }
+            if rid == "pycache" { throw Refused("review individual bytecode folders in the disk map") }
             if let def = Report.allRules(env).first(where: { $0.id == rid }) {
                 if def.safety == "keep" || (def.cmd?.hasPrefix("@") ?? false) {
                     throw Refused("this one is handled by hand, in the app that owns it")
                 }
                 if let cmd = def.cmd { return [.run(cmd)] }
+                if rid == "trash" { return try children(env.expand(def.path)).map(Step.delete) }
                 let outright = def.safety == "safe" || hard || Rules.permanent.contains(rid)
                 return try children(env.expand(def.path)).map { outright ? .delete($0) : .trash($0) }
             }
@@ -80,33 +149,60 @@ final class Cleaner: @unchecked Sendable {
                 var steps: [Step] = []
                 for shown in rule.paths {
                     let p = env.expand(shown)
-                    guard isNormal(p), containers.contains(parentPath(p)) else { throw Refused("not a cache folder: " + env.disp(p)) }
+                    guard isNormal(p), containers.contains(parentPath(p)),
+                          !Rules.table.contains(where: { env.expand($0.path) == p }) else { throw Refused("not a cache folder: " + env.disp(p)) }
                     if lexists(p) { steps += try children(p).map { .delete($0) } }
                 }
                 return steps
             }
             throw Refused("unknown item")
         }
+        if id.hasPrefix("duplicate:") {
+            let shown = String(id.dropFirst("duplicate:".count))
+            let path = env.expand(shown)
+            guard let group = scan?.dupes?.first(where: { $0.files.dropFirst().contains { $0.path == shown } }),
+                  let keeper = group.files.first.map({ env.expand($0.path) }),
+                  path.hasPrefix(env.home + "/"), keeper.hasPrefix(env.home + "/"),
+                  Self.userPathOK(path, env: env), Self.userPathOK(keeper, env: env),
+                  !Self.insideInstalledApp(shown), Report.copiesStillMatch(path, keeper) else {
+                throw Refused("the retained copy is missing or its contents no longer match")
+            }
+            return [hard ? .delete(path) : .trash(path)]
+        }
         if id.hasPrefix("file:") {
             let p = env.expand(String(id.dropFirst(5)))
             guard Cleaner.userPathOK(p, env: env) else { throw Refused("outside the folders Headroom is allowed to touch: " + env.disp(p)) }
-            guard lexists(p) else { throw Refused("already gone: " + env.disp(p)) }
-            let outright = hard || Rules.rebuildable.contains(lastComponent(p)) || insideCacheRule(p)
+            guard let st = lstatOf(p) else { throw Refused("already gone: " + env.disp(p)) }
+            if Self.insideInstalledApp(env.disp(p)) {
+                throw Refused("review the app in Applications to uninstall it")
+            }
+            let name = lastComponent(p)
+            let rebuildable = st.isDir && Rules.rebuildable.contains(name)
+                && Scanner.classify(name, parent: parentPath(p), path: p) != nil
+            let outright = hard || rebuildable || insideCacheRule(p)
             return [outright ? .delete(p) : .trash(p)]
         }
-        if id.hasPrefix("app:") {       // an app plus the support files it left in ~/Library
+        if id.hasPrefix("app:") {
             let p = env.expand(String(id.dropFirst(4)))
             let name = String(lastComponent(p).dropLast(4))
             guard p.hasSuffix(".app"), Cleaner.userPathOK(p, env: env), ["/Applications", env.home + "/Applications"].contains(parentPath(p)) else {
                 throw Refused("not an app Headroom can remove: " + env.disp(p))
             }
             guard let st = lstatOf(p), st.isDir else { throw Refused("already gone: " + env.disp(p)) }
-            guard let plist = lstatOf(p + "/Contents/Info.plist"), plist.isFile else { throw Refused("not an app bundle: " + env.disp(p)) }
+            guard realPath(p + "/Contents") == p + "/Contents", let plist = lstatOf(p + "/Contents/Info.plist"), plist.isFile else { throw Refused("not an app bundle: " + env.disp(p)) }
             if let own = env.ownBundle, realPath(p) == realPath(own) { throw Refused("Headroom cannot remove itself. Drag it to the Trash in Finder.") }
             guard let running = try? Cleaner.appRunning(p) else { throw Refused("could not check whether \(name) is running") }
             if running { throw Refused("quit \(name) first, then try again") }
-            let all = [p] + Report.appLeftovers(p, shared: Report.sharedAppNames(env), env: env)
-            return all.map { hard ? .delete($0) : .trash($0) }
+            var paths = [p]
+            if !selectedSupport.isEmpty {
+                let matched = Report.appLeftovers(p, shared: Report.sharedAppNames(env), env: env)
+                let selected = Set(selectedSupport.map(env.expand))
+                guard selected.isSubset(of: Set(matched)) else {
+                    throw Refused("A selected support file is missing or no longer belongs to this app. Review the selection again.")
+                }
+                paths += matched.filter(selected.contains)
+            }
+            return paths.map { hard ? .delete($0) : .trash($0) }
         }
         if id.hasPrefix("hfrepo:") || id.hasPrefix("hforphans:") {
             let orphans = id.hasPrefix("hforphans:")
@@ -115,11 +211,11 @@ final class Cleaner: @unchecked Sendable {
             guard isNormal(p), Rules.hfHubs.map(env.expand).contains(hub), realPath(hub) == hub else {
                 throw Refused("not a Hugging Face cache folder: " + env.disp(p))
             }
-            let (links, shared) = Report.hfLinks(hub)
+            let (links, shared) = try Report.hfLinks(hub)
             var steps: [Step] = []
             let blobs: [String]
             if orphans {
-                blobs = Report.hfOrphans(links, shared: shared)
+                blobs = try Report.hfOrphans(links, shared: shared)
             } else {
                 guard let mine = links[p] else { throw Refused("already gone: " + env.disp(p)) }
                 let others = links.filter { $0.key != p }.values.reduce(into: Set<String>()) { $0.formUnion($1) }
@@ -147,21 +243,30 @@ final class Cleaner: @unchecked Sendable {
 
     // MARK: - Doing it
 
-    static func remove(_ p: String) throws {
-        guard let st = lstatOf(p) else { return }
-        if !st.isDir {
-            if unlink(p) != 0 { throw EngineError(String(cString: strerror(errno))) }
-            return
+    static func remove(_ p: String, expected: ReviewedStep? = nil) throws {
+        let parent = parentPath(p)
+        guard realPath(parent) == parent else { throw Refused("the parent folder changed") }
+        let fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else { throw EngineError(String(cString: strerror(errno))) }
+        defer { close(fd) }
+        let name = lastComponent(p)
+        var st = stat(), dir = stat()
+        guard fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0, fstat(fd, &dir) == 0,
+              st.st_dev == dir.st_dev else { throw Refused("the target moved or is mounted") }
+        if let expected, st.st_ino != expected.inode || st.st_dev != expected.device ||
+            st.st_ctimespec.tv_sec != expected.changedSeconds || st.st_ctimespec.tv_nsec != expected.changedNanoseconds {
+            throw Refused("the target changed after review")
         }
-        try? FileManager.default.removeItem(atPath: p)
-        if lexists(p) { throw EngineError("some files are in use or protected and were left behind") }
+        let result = st.isDir ? removefileat(fd, name, nil, removefile_flags_t(REMOVEFILE_RECURSIVE)) : unlinkat(fd, name, 0)
+        if result != 0 { throw EngineError(String(cString: strerror(errno))) }
     }
 
     func runCommand(_ cmd: String) throws -> String {
         var e = ProcessInfo.processInfo.environment
+        e["HOME"] = env.home
         if e["UV_LOCK_TIMEOUT"] == nil { e["UV_LOCK_TIMEOUT"] = "30" }       // fail fast when another uv process holds the cache
-        e["PATH"] = (Rules.extraPath.map { ($0 as NSString).expandingTildeInPath } + [e["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"]).joined(separator: ":")
-        let (code, out) = try runTool("/bin/zsh", ["-lc", cmd], env: e, timeout: 1800)
+        e["PATH"] = (Rules.extraPath.map(env.expand) + [e["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"]).joined(separator: ":")
+        let (code, out) = try runTool("/bin/zsh", ["-c", cmd], env: e, timeout: 1800)
         if code == 127 { throw EngineError("the tool for this is not installed or not on PATH") }
         if code != 0 { throw EngineError(out.isEmpty ? "exit code \(code)" : String(out.suffix(300))) }
         return String(out.suffix(400))
@@ -174,11 +279,16 @@ final class Cleaner: @unchecked Sendable {
     }
 
     /// Carries out one id, or with `dry` only says what it would do.
-    func clean(_ id: String, hard: Bool, dry: Bool, scan: Scan?) -> CleanResult {
+    func clean(_ id: String, hard: Bool, dry: Bool, scan: Scan?, reviewed: [ReviewedStep]? = nil,
+               selectedSupport: Set<String> = []) -> CleanResult {
+        if !dry { lock.lock() }
+        defer { if !dry { lock.unlock() } }
         var res = CleanResult(id: id)
         let steps: [Step]
+        let current: [ReviewedStep]
         do {
-            steps = try resolve(id, hard: hard, scan: scan)
+            steps = try resolve(id, hard: hard, scan: scan, selectedSupport: selectedSupport)
+            current = dry ? try steps.map(ReviewedStep.init) : []
         } catch let r as Refused {
             res.errors.append(r.message)
             return res
@@ -187,19 +297,24 @@ final class Cleaner: @unchecked Sendable {
             return res
         }
         res.summary = Cleaner.summarise(steps)
+        if let reviewed, steps != reviewed.map(\.step) {
+            res.errors = ["The targets changed after review. Review this item again."]
+            return res
+        }
         if dry {
+            res.preview = current
             res.ok = true
             return res
         }
-        lock.lock()                     // one cleanup at a time
-        defer { lock.unlock() }
         let before = freeBytes()
         var failed = 0
-        for step in steps {
+        for (index, step) in steps.enumerated() {
             do {
+                let expected = reviewed?[index]
+                if let expected, try ReviewedStep(step) != expected { throw Refused("the target changed after review") }
                 switch step {
                 case .run(let cmd): res.output = try runCommand(cmd)
-                case .delete(let p): try Cleaner.remove(p)
+                case .delete(let p): try Cleaner.remove(p, expected: expected)
                 case .trash(let p):
                     try env.trasher(p)
                     res.trashed += 1
@@ -214,6 +329,8 @@ final class Cleaner: @unchecked Sendable {
                     }
                     res.errors.append("\(target): \(error.localizedDescription)")
                 }
+                // Later steps depend on successfully removing the bundle or model repository.
+                if index == 0 && (id.hasPrefix("app:") || id.hasPrefix("hfrepo:")) { break }
             }
         }
         if failed > res.errors.count { res.errors.append("and \(failed - res.errors.count) more") }
@@ -231,13 +348,12 @@ final class Cleaner: @unchecked Sendable {
                                     "freed": res.freed, "errors": res.errors]
         guard var data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return }
         data.append(0x0A)
-        if let h = FileHandle(forWritingAtPath: env.logPath) {
-            defer { try? h.close() }
-            _ = try? h.seekToEnd()
-            try? h.write(contentsOf: data)
-        } else {
-            FileManager.default.createFile(atPath: env.logPath, contents: data)
-        }
+        let fd = open(env.logPath, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { return }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.isFile else { return }
+        try? handle.write(contentsOf: data)
     }
 
     // MARK: - Looking inside a folder

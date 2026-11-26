@@ -12,8 +12,9 @@ struct EngineError: LocalizedError {
 }
 
 /// Thrown when the engine declines to touch something. The message is shown to the person.
-struct Refused: Error {
+struct Refused: LocalizedError {
     var message: String
+    var errorDescription: String? { message }
     init(_ message: String) { self.message = message }
 }
 
@@ -22,6 +23,7 @@ final class Env: @unchecked Sendable {
     let home: String
     /// Where scan.json, history.json and the action log live.
     let support: String
+    let scanPath: String
     /// Folders that hold installed apps.
     let appDirs: [String]
     /// This user's /private/var/folders/xx/yyy folder, or nil to leave temp rules out.
@@ -32,9 +34,10 @@ final class Env: @unchecked Sendable {
     var trasher: (String) throws -> Void
 
     init(home: String, support: String, appDirs: [String]? = nil, tempBase: String? = nil, ownBundle: String? = nil,
-         trasher: ((String) throws -> Void)? = nil) {
+         scanFile: String? = nil, trasher: ((String) throws -> Void)? = nil) {
         self.home = home
         self.support = support
+        self.scanPath = scanFile ?? support + "/scan.json"
         self.appDirs = appDirs ?? ["/Applications", "/Applications/Utilities", home + "/Applications"]
         self.tempBase = tempBase
         self.ownBundle = ownBundle
@@ -44,7 +47,7 @@ final class Env: @unchecked Sendable {
     /// The real Mac: the user's home, Application Support, and the system temp folder.
     static func live() -> Env {
         let home = NSHomeDirectory()
-        let override = ProcessInfo.processInfo.environment["HEADROOM_OUT"]
+        let override = ProcessInfo.processInfo.environment["HEADROOM_OUT"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).standardizedFileURL.path }
         let support = override.map { ($0 as NSString).deletingLastPathComponent }
             ?? home + "/Library/Application Support/Headroom"
         try? FileManager.default.createDirectory(atPath: support, withIntermediateDirectories: true)
@@ -54,10 +57,24 @@ final class Env: @unchecked Sendable {
             temp = (real as NSString).deletingLastPathComponent
         }
         let bundle = Bundle.main.bundlePath
-        return Env(home: home, support: support, tempBase: temp, ownBundle: bundle.hasSuffix(".app") ? bundle : nil)
+        return Env(home: home, support: support, tempBase: temp, ownBundle: bundle.hasSuffix(".app") ? bundle : nil, scanFile: override)
     }
 
-    var scanPath: String { support + "/scan.json" }
+    /// Developer-only cleanup runs in an explicitly named disposable home with its own Trash.
+    static func fixture(_ path: String?) throws -> Env {
+        guard let path, let root = realPath(path), isDirectory(root),
+              lastComponent(root).hasPrefix("HeadroomFixture"), lstatOf(root)?.st_uid == getuid(),
+              [NSTemporaryDirectory(), "/tmp"].compactMap(realPath).contains(parentPath(root)) else {
+            throw Refused("set HEADROOM_FIXTURE_HOME to a HeadroomFixture directory directly inside the system temp folder")
+        }
+        let work = root + "/.headroom-" + UUID().uuidString
+        let trash = work + "/Trash"
+        try FileManager.default.createDirectory(atPath: trash, withIntermediateDirectories: true)
+        return Env(home: root, support: work, appDirs: [], trasher: { path in
+            try FileManager.default.moveItem(atPath: path, toPath: trash + "/" + UUID().uuidString + "-" + lastComponent(path))
+        })
+    }
+
     var historyPath: String { support + "/history.json" }
     var logPath: String { support + "/headroom-actions.log" }
 
@@ -105,6 +122,7 @@ func lastComponent(_ p: String) -> String {
 
 /// A path with no "." or ".." parts, no doubled or trailing slash: what os.path.normpath leaves unchanged.
 func isNormal(_ p: String) -> Bool {
+    guard !p.utf8.contains(0) else { return false }
     if p == "/" { return true }
     guard p.hasPrefix("/"), !p.hasSuffix("/") else { return false }
     for part in p.dropFirst().split(separator: "/", omittingEmptySubsequences: false) where part.isEmpty || part == "." || part == ".." {
@@ -138,14 +156,15 @@ func lexists(_ p: String) -> Bool { lstatOf(p) != nil }
 
 /// Names in a folder, or nil if it cannot be read. Never follows the folder if it is a placeholder: callers check first.
 func listNames(_ p: String) -> [String]? {
-    guard let d = opendir(p) else { return nil }
+    guard let st = lstatOf(p), st.isDir, st.st_flags & SF_DATALESS_FLAG == 0, let d = opendir(p) else { return nil }
     defer { closedir(d) }
     var out: [String] = []
-    while let e = readdir(d) {
+    while true {
+        errno = 0
+        guard let e = readdir(d) else { return errno == 0 ? out : nil }
         let name = withUnsafePointer(to: &e.pointee.d_name) { $0.withMemoryRebound(to: CChar.self, capacity: Int(e.pointee.d_namlen) + 1) { String(cString: $0) } }
         if name != "." && name != ".." { out.append(name) }
     }
-    return out
 }
 
 /// Runs a program and returns (exit code, combined output). Kills it after `timeout` seconds.

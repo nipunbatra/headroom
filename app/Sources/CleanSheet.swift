@@ -15,7 +15,7 @@ import SwiftUI
                 VStack(alignment: .leading, spacing: Space.s) {
                     Text("Cleanup List").font(.headline)
                     Text(fmt(model.planTotal)).font(.system(size: 28, weight: .semibold, design: .rounded)).monospacedDigit()
-                    Text("comes back from \(plural(items.count, "item"))").foregroundStyle(.secondary)
+                    Text("estimated across \(plural(items.count, "item"))").foregroundStyle(.secondary)
                     HStack(spacing: Space.s) {
                         Button("Review and Clean…") { model.review(model.plan) }
                             .buttonStyle(.borderedProminent)
@@ -59,7 +59,9 @@ import SwiftUI
 @MainActor struct CleanSheet: View {
     @Environment(AppModel.self) private var model
     @Bindable var session: CleanSession
-    @State private var confirmTrash = false
+    @State private var expandedTargets: Set<String> = []
+    @State private var expandedApps: Set<String> = []
+    private var homeTrashOnly: Bool { session.items.map(\.id) == ["rule:trash"] }
 
     private var total: Int64 { model.totalOf(session.items.filter { session.blocked[$0.id] == nil }) }
     private var runnable: Int { session.items.filter { session.blocked[$0.id] == nil }.count }
@@ -77,24 +79,19 @@ import SwiftUI
                 itemRow(it)
             }
             .listStyle(.inset)
-            .frame(height: min(380, max(120, CGFloat(session.items.count) * 50 + 12)))
+            .frame(height: min(360, max(expandedApps.isEmpty ? (expandedTargets.isEmpty ? 140 : 240) : 320, CGFloat(session.items.count) * 72 + 12)))
             Divider()
 
             footer.padding(Space.l)
         }
         .frame(width: 640)
         .interactiveDismissDisabled(session.stage == .running)
-        .confirmationDialog("Empty Trash?", isPresented: $confirmTrash) {
-            Button("Empty Trash", role: .destructive) { Task { await model.emptyTrash() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You can't undo this action.")
-        }
     }
 
     private var title: String {
         switch session.stage {
         case .review:
+            if homeTrashOnly { return "Empty your home Trash?" }
             return session.items.count == 1 ? "Clean “\(session.items[0].title)”?" : "Clean \(session.items.count) Items?"
         case .running:
             return "Cleaning \(min(session.current + 1, max(1, session.planned))) of \(session.planned)"
@@ -106,7 +103,11 @@ import SwiftUI
     private var summary: String {
         switch session.stage {
         case .review:
-            return "About \(fmt(total)) comes back. A folder inside another one is counted once. Each line says what cleaning does."
+            if model.scanning { return "The disk scan is running. You can confirm this cleanup when the scan finishes." }
+            if homeTrashOnly { return "Review everything currently in your home Trash. Confirming permanently removes these items, including files from earlier cleanups." }
+            return session.ready
+                ? "Up to \(fmt(total)) selected. Items moved to Trash use space until you empty it. Tool commands may reclaim only part of their estimate."
+                : "Checking current files and what will happen to each item…"
         case .running:
             return "Keep Headroom open until this finishes."
         case .done:
@@ -128,9 +129,42 @@ import SwiftUI
                     PillView(pill: Pill.safety(it.safety))
                 }
                 status(it)
+                if session.stage == .review, !it.supportOptions.isEmpty {
+                    DisclosureGroup("Choose support files (\(it.selectedSupport.count) of \(it.supportOptions.count))", isExpanded: Binding(
+                        get: { expandedApps.contains(it.id) },
+                        set: { if $0 { expandedApps.insert(it.id) } else { expandedApps.remove(it.id) } }
+                    )) {
+                        VStack(alignment: .leading, spacing: Space.s) {
+                            Text("Unchecked files stay on your Mac. Support folders can contain documents, profiles, and settings.")
+                                .foregroundStyle(.secondary)
+                            ForEach(it.supportOptions, id: \.path) { option in
+                                Toggle(isOn: Binding(get: { it.selectedSupport.contains(option.path) },
+                                                     set: { model.selectSupport(option.path, for: it.id, include: $0) })) {
+                                    Text(option.path + " · " + fmt(option.returns)).textSelection(.enabled)
+                                }
+                                .toggleStyle(.checkbox)
+                            }
+                        }.font(.callout).padding(.vertical, Space.xs)
+                    }.font(.callout)
+                }
+                if session.stage == .review, let targets = session.previews[it.id], !targets.isEmpty {
+                    DisclosureGroup("Show " + plural(targets.count, "target"), isExpanded: Binding(
+                        get: { expandedTargets.contains(it.id) },
+                        set: { if $0 { expandedTargets.insert(it.id) } else { expandedTargets.remove(it.id) } }
+                    )) {
+                        ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
+                            switch target.step {
+                            case .run(let cmd): Text(cmd).textSelection(.enabled)
+                            case .delete(let p), .trash(let p): Text(model.engine.env.disp(p)).textSelection(.enabled)
+                            }
+                        }
+                        .font(.caption.monospaced())
+                    }
+                    .font(.callout)
+                }
             }
             Spacer(minLength: Space.s)
-            Text(fmt(it.bytes)).monospacedDigit().foregroundStyle(.secondary)
+            if !homeTrashOnly { Text(fmt(it.bytes)).monospacedDigit().foregroundStyle(.secondary) }
             if session.stage == .review {
                 Button {
                     model.removeFromSession(it.id)
@@ -174,20 +208,22 @@ import SwiftUI
         switch session.stage {
         case .review:
             VStack(alignment: .leading, spacing: Space.m) {
-                Toggle("Delete immediately, without the Trash", isOn: $session.hard)
-                    .onChange(of: session.hard) { _, _ in model.refreshDry() }
-                Text(session.hard ? "Everything is deleted at once and cannot be brought back."
-                                  : "Caches and commands cannot be undone. Anything moved to the Trash can be put back until you empty it.")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if !homeTrashOnly {
+                    Toggle("Delete immediately, without the Trash", isOn: $session.hard)
+                        .onChange(of: session.hard) { _, _ in model.refreshDry() }
+                    Text(session.hard ? "Everything is deleted at once and cannot be brought back."
+                                      : "Caches and commands cannot be undone. Anything moved to the Trash can be put back until you empty it.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
                 HStack {
                     Spacer()
                     Button("Cancel", role: .cancel) { model.closeSession() }.keyboardShortcut(.cancelAction)
-                    Button(runnable == session.items.count ? "Clean \(fmt(total))" : "Clean \(runnable) of \(session.items.count)") {
+                    Button(homeTrashOnly ? "Empty Home Trash" : "Clean " + plural(runnable, "item")) {
                         Task { await model.runClean() }
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(runnable == 0)
+                    .disabled(model.scanning || !session.ready || runnable == 0)
                 }
             }
         case .running:
@@ -199,18 +235,8 @@ import SwiftUI
             }
         case .done:
             HStack(spacing: Space.s) {
-                if session.trashed > 0 || session.trash != .idle {
-                    switch session.trash {
-                    case .idle:
-                        Button("Empty Trash…") { confirmTrash = true }
-                    case .emptying:
-                        ProgressView().controlSize(.small)
-                        Text("Emptying the Trash").foregroundStyle(.secondary)
-                    case .emptied(let free):
-                        Label("Trash emptied, \(free) free", systemImage: "checkmark.circle.fill").symbolRenderingMode(.multicolor)
-                    case .failed:
-                        Label("Unable to empty the Trash. Try it in Finder.", systemImage: "exclamationmark.triangle.fill").symbolRenderingMode(.multicolor)
-                    }
+                if session.trashed > 0 {
+                    Button("Review Home Trash…") { model.reviewHomeTrash() }
                 }
                 Spacer()
                 Button("Scan Again") {

@@ -22,13 +22,7 @@ struct DirEntry {
 
 enum Reader {
     private static let bufferSize = 1 << 18
-    /// False once a file system refuses the bulk call; the plain reader takes over.
-    private static var fast = true
-    /// False once the system refuses the clone copy count (older macOS).
-    private static var copies = true
-    private static let lock = NSLock()
-
-    private static var bulkAttrs: attrlist = {
+    private static let bulkAttrs: attrlist = {
         var a = attrlist()
         a.bitmapcount = 5
         a.commonattr = 0x8000_0000 | 0x1 | 0x8 | 0x400 | 0x40000 | 0x200_0000   // returned-attrs | name | type | modified | flags | file id
@@ -41,64 +35,58 @@ enum Reader {
     /// One folder's files and folders; other things (links, sockets) are left out.
     /// `rootDev` lets the plain reader spot mounted volumes. Throws POSIXError if the folder cannot be opened.
     static func readDir(_ path: String, rootDev: dev_t? = nil, buffer: UnsafeMutableRawPointer? = nil) throws -> [DirEntry] {
-        if fast {
-            let fd = open(path, O_RDONLY | O_DIRECTORY)
-            if fd < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            defer { close(fd) }
-            let own = buffer == nil
-            let buf = buffer ?? UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 8)
-            defer { if own { buf.deallocate() } }
-            var out: [DirEntry] = []
-            var attrs = bulkAttrs
-            while true {
-                let count = getattrlistbulk(fd, &attrs, buf, bufferSize, 0x28)
-                if count <= 0 {
-                    if count < 0, out.isEmpty {
-                        let e = errno
-                        if e == EINVAL || e == ENOTSUP {
-                            lock.lock()
-                            fast = false            // this file system cannot do it
-                            lock.unlock()
-                            return try plainRead(path, rootDev: rootDev)
-                        }
-                        throw POSIXError(POSIXErrorCode(rawValue: e) ?? .EIO)
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        if fd < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        let own = buffer == nil
+        let buf = buffer ?? UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 8)
+        defer { if own { buf.deallocate() } }
+        var out: [DirEntry] = []
+        var attrs = bulkAttrs
+        while true {
+            let count = getattrlistbulk(fd, &attrs, buf, bufferSize, 0x28)
+            if count <= 0 {
+                if count < 0 {
+                    let e = errno
+                    if e == EINVAL || e == ENOTSUP {
+                        return try plainRead(path, rootDev: rootDev)
                     }
-                    return out
+                    throw POSIXError(POSIXErrorCode(rawValue: e) ?? .EIO)
                 }
-                var p = UnsafeRawPointer(buf)
-                for _ in 0..<count {
-                    let length = Int(p.loadUnaligned(as: UInt32.self))
-                    let dirAttrs = p.loadUnaligned(fromByteOffset: 12, as: UInt32.self)
-                    let fileAttrs = p.loadUnaligned(fromByteOffset: 16, as: UInt32.self)
-                    let nameOff = Int(p.loadUnaligned(fromByteOffset: 24, as: Int32.self))
-                    let nameLen = Int(p.loadUnaligned(fromByteOffset: 28, as: UInt32.self))
-                    let type = p.loadUnaligned(fromByteOffset: 32, as: UInt32.self)
-                    if type == 1 || type == 2 {     // VREG, VDIR
-                        let name = String(decoding: UnsafeRawBufferPointer(start: p + 24 + nameOff, count: max(0, nameLen - 1)), as: UTF8.self)
-                        var e = DirEntry(name: name, isDir: type == 2)
-                        e.mtime = p.loadUnaligned(fromByteOffset: 36, as: Int64.self)
-                        e.id = p.loadUnaligned(fromByteOffset: 56, as: UInt64.self)
-                        if type == 1 {
-                            if fileAttrs != 0 {
-                                e.links = p.loadUnaligned(fromByteOffset: 64, as: UInt32.self)
-                                e.bytes = p.loadUnaligned(fromByteOffset: 68, as: Int64.self)
-                                e.length = p.loadUnaligned(fromByteOffset: 76, as: Int64.self)
-                                e.cloneID = p.loadUnaligned(fromByteOffset: 84, as: UInt64.self)
-                                e.mayShare = p.loadUnaligned(fromByteOffset: 92, as: UInt64.self) & 1 != 0
-                                out.append(e)
-                            }
-                        } else {
-                            let flags = p.loadUnaligned(fromByteOffset: 52, as: UInt32.self)
-                            let mounted = dirAttrs != 0 && p.loadUnaligned(fromByteOffset: 64, as: UInt32.self) & 1 != 0
-                            e.skip = mounted ? .mount : flags & SF_DATALESS_FLAG != 0 ? .dataless : .none
+                return out
+            }
+            var p = UnsafeRawPointer(buf)
+            for _ in 0..<count {
+                let length = Int(p.loadUnaligned(as: UInt32.self))
+                let dirAttrs = p.loadUnaligned(fromByteOffset: 12, as: UInt32.self)
+                let fileAttrs = p.loadUnaligned(fromByteOffset: 16, as: UInt32.self)
+                let nameOff = Int(p.loadUnaligned(fromByteOffset: 24, as: Int32.self))
+                let nameLen = Int(p.loadUnaligned(fromByteOffset: 28, as: UInt32.self))
+                let type = p.loadUnaligned(fromByteOffset: 32, as: UInt32.self)
+                if type == 1 || type == 2 {     // VREG, VDIR
+                    let name = String(decoding: UnsafeRawBufferPointer(start: p + 24 + nameOff, count: max(0, nameLen - 1)), as: UTF8.self)
+                    var e = DirEntry(name: name, isDir: type == 2)
+                    e.mtime = p.loadUnaligned(fromByteOffset: 36, as: Int64.self)
+                    e.id = p.loadUnaligned(fromByteOffset: 56, as: UInt64.self)
+                    if type == 1 {
+                        if fileAttrs != 0 {
+                            e.links = p.loadUnaligned(fromByteOffset: 64, as: UInt32.self)
+                            e.bytes = p.loadUnaligned(fromByteOffset: 68, as: Int64.self)
+                            e.length = p.loadUnaligned(fromByteOffset: 76, as: Int64.self)
+                            e.cloneID = p.loadUnaligned(fromByteOffset: 84, as: UInt64.self)
+                            e.mayShare = p.loadUnaligned(fromByteOffset: 92, as: UInt64.self) & 1 != 0
                             out.append(e)
                         }
+                    } else {
+                        let flags = p.loadUnaligned(fromByteOffset: 52, as: UInt32.self)
+                        let mounted = dirAttrs != 0 && p.loadUnaligned(fromByteOffset: 64, as: UInt32.self) & 1 != 0
+                        e.skip = mounted ? .mount : flags & SF_DATALESS_FLAG != 0 ? .dataless : .none
+                        out.append(e)
                     }
-                    p += length
                 }
+                p += length
             }
         }
-        return try plainRead(path, rootDev: rootDev)
     }
 
     private static func plainRead(_ path: String, rootDev: dev_t?) throws -> [DirEntry] {
@@ -136,7 +124,6 @@ enum Reader {
 
     /// Bytes that come back at once if this file is deleted: 0 for a pure clone. Nil if unknown.
     static func privateBytes(_ path: String) -> Int64? {
-        guard fast else { return nil }
         // Working out the private size can take seconds on a large, fragmented file. A file that
         // is not flagged as possibly sharing blocks shares nothing, so its size on disk is the answer.
         var a = attrlist()
@@ -153,15 +140,7 @@ enum Reader {
 
     /// (bytes deleting this file returns, how many clone copies exist or nil if the system cannot say).
     static func cloneInfo(_ path: String) -> (Int64?, Int?) {
-        guard fast else { return (nil, nil) }
-        if copies {
-            if let (priv, n) = extended(path, 0x8 | 0x1000) { return (priv, Int(n)) }
-            if errno == EINVAL {
-                lock.lock()
-                copies = false
-                lock.unlock()
-            }
-        }
+        if let (priv, n) = extended(path, 0x8 | 0x1000) { return (priv, Int(n)) }
         return (privateBytes(path), nil)
     }
 
@@ -179,6 +158,8 @@ enum Reader {
         var m = Measure()
         var priv: Int64 = 0
         var groups: [UInt64: (shared: Int64, seen: Int, copies: Int?)] = [:]
+        let device = lstatOf(path)?.st_dev
+        var hardLinks: [UInt64: (count: UInt32, total: UInt32, priv: Int64)] = [:]
         var stack = [path]
         let buf = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 8)
         defer { buf.deallocate() }
@@ -187,25 +168,28 @@ enum Reader {
                 m.partial = true
                 break
             }
-            guard let entries = try? readDir(dir, buffer: buf) else { continue }
+            guard let entries = try? readDir(dir, rootDev: device, buffer: buf) else { m.partial = true; continue }
             for e in entries {
                 if !e.isDir {
+                    if var seen = hardLinks[e.id] {
+                        seen.count += 1
+                        hardLinks[e.id] = seen
+                        continue
+                    }
                     var pv = e.bytes
                     if e.mayShare, e.bytes > 0 {
                         let (p, n) = cloneInfo(dir + "/" + e.name)
                         if let p, p < e.bytes {
                             pv = p
-                            if var g = groups[e.cloneID] {
-                                g.shared = max(g.shared, e.bytes - p)
-                                g.seen += 1
-                                groups[e.cloneID] = g
-                            } else {
-                                groups[e.cloneID] = (e.bytes - p, 1, n)
+                            if e.cloneID != 0, e.links <= 1 {
+                                let prior = groups[e.cloneID]
+                                groups[e.cloneID] = (max(prior?.shared ?? 0, e.bytes - p), (prior?.seen ?? 0) + 1, n)
                             }
                         }
                     }
                     m.bytes += e.bytes
-                    priv += pv
+                    if e.links > 1 { hardLinks[e.id] = (1, e.links, pv) }
+                    else { priv += pv }
                     m.files += 1
                     m.newest = max(m.newest, e.mtime)
                 } else if e.skip == .none {
@@ -214,7 +198,8 @@ enum Reader {
             }
         }
         // shared space comes back only when every copy of the clone is inside this tree
-        for g in groups.values where g.seen > 1 && (g.copies == nil || g.seen >= g.copies!) { priv += g.shared }
+        for g in groups.values where g.seen > 1 && g.copies == g.seen { priv += g.shared }
+        for link in hardLinks.values where link.count == link.total { priv += link.priv }
         m.returns = min(m.bytes, priv)
         return m
     }
