@@ -53,9 +53,13 @@ struct ReviewedStep: Equatable {
         var hash = SHA256()
         var stack = [root]
         var buffer = Data()
+        let buildFolder = Rules.rebuildable.contains(lastComponent(root))
         while let directory = stack.popLast() {
             guard let names = listNames(directory) else { throw Refused("cannot verify all contents of this folder") }
             for name in names.sorted() {
+                if buildFolder && name.lowercased() == ".git" {
+                    throw Refused("This build folder contains a Git checkout. Review it in Finder.")
+                }
                 let path = directory + "/" + name
                 guard let st = lstatOf(path), st.st_dev == device, st.st_flags & SF_DATALESS_FLAG == 0 else {
                     throw Refused("a mounted, cloud-only, or changed item prevents permanent cleanup")
@@ -310,11 +314,11 @@ final class Cleaner: @unchecked Sendable {
         var failed = 0
         for (index, step) in steps.enumerated() {
             do {
-                let expected = reviewed?[index]
-                if let expected, try ReviewedStep(step) != expected { throw Refused("the target changed after review") }
+                let currentStep = try ReviewedStep(step)
+                if let expected = reviewed?[index], currentStep != expected { throw Refused("the target changed after review") }
                 switch step {
                 case .run(let cmd): res.output = try runCommand(cmd)
-                case .delete(let p): try Cleaner.remove(p, expected: expected)
+                case .delete(let p): try Cleaner.remove(p, expected: currentStep)
                 case .trash(let p):
                     try env.trasher(p)
                     res.trashed += 1

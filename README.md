@@ -86,6 +86,7 @@ Without it the Trash, Mail, Messages and Photos internals cannot be measured.
 - Uninstalling an app starts with just the bundle. Each optional Library path is matched by bundle
   identifier or exact name and checked again at removal. Shared identifiers and vendor directories
   are skipped. Quit a running app before uninstalling.
+- Permanent cleanup of a rebuildable folder stops if it contains a nested Git checkout or worktree.
 - Headroom refuses anything outside your home folder (apart from apps in `/Applications`),
   top-level folders such as `~/Documents`, anything reached through a symlink, and `.git` folders.
 - Every action is written to `~/Library/Application Support/Headroom/headroom-actions.log`.

@@ -2,6 +2,32 @@
 import Foundation
 
 func auditRegressionTests() {
+    T.test("rebuildable folders containing a Git checkout or worktree stay intact") {
+        for worktree in [false, true] {
+            let f = Fixture(), c = Cleaner(env: f.env)
+            let id = "file:~/Projects/demo/node_modules"
+            let marker = "Projects/demo/node_modules/local-package/.git"
+            if worktree { f.text(marker, "gitdir: elsewhere") } else { f.dir(marker + "/objects") }
+            let dry = c.clean(id, hard: false, dry: true, scan: nil)
+            T.expect(!dry.ok && dry.errors.first?.contains("Git checkout") == true)
+            T.expect(!c.clean(id, hard: false, dry: false, scan: nil).ok)
+            T.expect(f.exists(marker))
+        }
+    }
+
+    T.test("a support file that ceases to match blocks uninstall before moving the bundle") {
+        let f = Fixture(), c = Cleaner(env: f.env)
+        let bundle = f.app("Studio", id: "org.example.studio")
+        let path = f.dir("Library/Caches/org.example.studio")
+        let id = "app:" + bundle
+        let preview = c.clean(id, hard: false, dry: true, scan: nil, selectedSupport: [path])
+        T.expect(preview.ok)
+        _ = f.app("Second", id: "org.example.studio")
+        let actual = c.clean(id, hard: false, dry: false, scan: nil, reviewed: preview.preview, selectedSupport: [path])
+        T.expect(!actual.ok)
+        T.expect(lexists(bundle) && lexists(path) && f.trashed.isEmpty)
+    }
+
     T.test("scan output preserves reserved history and log files") {
         let f = Fixture()
         for name in ["history.json", "History.JSON", "headroom-actions.log"] {
