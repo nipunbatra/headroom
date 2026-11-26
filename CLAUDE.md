@@ -1,7 +1,8 @@
 # Headroom
 
 A standalone Mac storage analyser and cleaner (in the spirit of CleanMyMac / DaisyDisk / Mole).
-It runs without Claude: open `dist/Headroom.app`, it scans, you click Clean.
+It runs without Claude: open Headroom, it scans, you click Clean. The app is native SwiftUI
+(sidebar, toolbar, menus, menu bar item) on top of a Python scanner that it runs as a local helper.
 
 ## Pieces
 
@@ -15,12 +16,29 @@ It runs without Claude: open `dist/Headroom.app`, it scans, you click Clean.
   (injected by the server) switches it into app mode with Clean buttons and Scan again. Without
   it the page is a read-only snapshot that only builds a script; that is what the claude.ai
   artifact shows. No doctype/html/head/body tags: the server and the artifact host add them.
-- `app/main.swift`: native window (WKWebView) that starts `scan.py app --stay --port 0`, reads
-  the `HEADROOM_URL` line it prints, and loads that page. `app/make_icon.swift` draws the icon.
-- `build.sh`: compiles the wrapper with `swiftc` as a universal binary, copies `scan.py` and
-  `index.html` into `dist/Headroom.app/Contents/Resources`, makes the icon, ad-hoc signs, and
-  zips it to `dist/Headroom.zip` for sharing. `./build.sh --install` then moves the app into
+- `app/Sources/*.swift`: the native SwiftUI app (macOS 14+), compiled by `build.sh` with plain
+  `swiftc`. It starts `scan.py app --stay --port 0`, reads the `HEADROOM_TOKEN` and `HEADROOM_URL`
+  lines from the pipe, and talks to that helper (`Engine.swift`). It reads `scan.json` from disk.
+  - `AppModel.swift`: all state (`@Observable`): the scan, candidates, the cleanup list (`plan`),
+    the clean session, live free space, alerts. `Rows.swift` turns the scan into one `Row` shape
+    for every page; `RowList.swift` draws it (selection, context menu, Space, Delete).
+  - `Shell.swift` (window, sidebar, toolbar, scanning, What Changed), `Overview.swift` (level
+    meter, cards, chart), `MapView.swift` (treemap), `CleanSheet.swift` (cleanup list inspector and
+    the review sheet), `MenuBar.swift` (menu bar item, Settings), `App.swift` (scenes, menus,
+    snapshot and self-test modes).
+  - Views are marked `@MainActor`: the toolchain here is Swift 5.9, where only `body` is isolated.
+  - A plain `VStack` of text above a `List` as a page root rendered a blank window once (What
+    Changed). Put page summaries in the list via `RowList(header:)` instead.
+- `app/make_icon.swift` draws the icon.
+- `build.sh`: compiles a universal binary, copies `scan.py` and `index.html` into
+  `dist/Headroom.app/Contents/Resources`, makes the icon, ad-hoc signs, and zips it to
+  `dist/Headroom.zip`. `--debug` is a quick local build; `--install` moves the app into
   `/Applications` (quitting a running copy first). Rebuild after any edit.
+- `HEADROOM_SNAPSHOT=<dir>` makes the app save a PNG of every page in light and dark and quit (it
+  captures its own window, so no Screen Recording permission is needed). `HEADROOM_SELFTEST=<ids>`
+  cleans fixture ids through the real model code; it refuses ids that are not fixtures.
+- `index.html` is the earlier web UI. It still works (`python3 scan.py app`) and is what the
+  claude.ai artifact shows, but new features go into the native app first.
 - Never share or commit `scan.json`: it lists this Mac's folder and file names.
 - The app keeps its data in `~/Library/Application Support/Headroom/` (`scan.json`,
   `headroom-actions.log`). Dev mode (`python3 scan.py app`) uses this folder instead.
@@ -51,6 +69,18 @@ It runs without Claude: open `dist/Headroom.app`, it scans, you click Clean.
 - `/api/list` returns one folder's live contents (home folder only, read-only, 6 second budget);
   `/api/reveal` shows an item in Finder. "Look inside" in the UI is built on these.
 - Rules in `PERMANENT` are download caches: removed outright, like other caches.
+
+## History, what changed, uninstalling
+
+- Each scan is compared with the one it replaces: `diff_trees()` reports the deepest folders that
+  explain the change, using returnable sizes (`r`) so a fresh clone of something already on disk
+  is not growth. The result is `changes` in `scan.json`. `history.json` (numbers only) keeps free
+  space per scan plus one reading every 3 hours from `/api/history`.
+- `app:` ids uninstall an app. Only bundles directly in `/Applications` or `~/Applications` with a
+  real `Contents/Info.plist` qualify. `app_leftovers()` adds paths from `LEFTOVER_SPOTS` that
+  carry the app's bundle id (three parts or more) or exact name, pass `user_path_ok()`, and are
+  reached without a symlink. An id or name used by two installed apps, or a vendor folder name,
+  is never matched. A running app is refused. All of this is decided on the server at delete time.
 
 ## Sizes: on disk versus what deleting returns
 

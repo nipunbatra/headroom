@@ -3,6 +3,8 @@ scan.json
 scan.json.tmp
 scan.backup.json
 headroom-actions.log
+history.json
+history.json.tmp
 
 # Build output
 dist/

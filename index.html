@@ -382,7 +382,7 @@ function prepare(){
   (D.bigFiles||[]).forEach(f=>{ if(pickable(f.path))cand({id:"file:"+f.path,title:baseName(f.path),bytes:fr(f),paths:[f.path],cmd:null,safety:"review"}); });
   (D.dupes||[]).forEach(g=>g.files.forEach(f=>{ if(pickable(f.path))cand({id:"file:"+f.path,title:baseName(f.path),bytes:g.bytes,paths:[f.path],cmd:null,safety:"review"}); }));
   (D.downloads||[]).forEach(f=>{ f.path="~/Downloads/"+f.name; cand({id:"file:"+f.path,title:f.name,bytes:fr(f),paths:[f.path],cmd:null,safety:"review"}); });
-  (D.apps||[]).forEach(a=>{ if(pickable(a.path)&&a.bytes)cand({id:"file:"+a.path,title:a.name+" (app)",bytes:fr(a),paths:[a.path],cmd:null,safety:"review"}); });
+  (D.apps||[]).forEach(a=>{ a.left=a.leftovers||[]; a.all=fr(a)+a.left.reduce((t,l)=>t+fr(l),0); if(pickable(a.path)&&a.bytes)cand({id:"app:"+a.path,title:a.name+" (app)",bytes:a.all,paths:[a.path].concat(a.left.map(l=>l.path)),cmd:null,safety:"review"}); });
   NODES.forEach((n,p)=>{ if(pickable(p))cand({id:"file:"+p,title:n.n,bytes:n.r!=null?n.r:n.s,paths:[p],cmd:null,safety:"review"}); });
   computeX();
 }
@@ -773,9 +773,9 @@ function vDownloaded(){
 
 function vApps(){
   const apps=(D.apps||[]).filter(a=>a.bytes), max=Math.max(1,...apps.map(fr)), known=apps.some(a=>a.lastUsed);
-  return `<section class="panel">${head("Applications",(known?"Size on disk and the last time macOS recorded each app being opened.":"Size on disk. Last-opened dates are missing because Spotlight has no index on this disk.")+" Removing an app here leaves its support files behind; check the disk map under ~/Library for those.")}
+  return `<section class="panel">${head("Applications",(known?"Size on disk and the last time macOS recorded each app being opened.":"Size on disk. Last-opened dates are missing because Spotlight has no index on this disk.")+" Removing an app also removes the support files it left in ~/Library, matched by the app's own identifier.")}
     <ul class="rows">${apps.map(a=>{const d=days(a.lastUsed);
-      return row({id:"file:"+a.path,title:a.name,path:a.path,bytes:fr(a),disk:a.bytes,meta:a.lastUsed?"opened "+age(a.lastUsed):(known?"no open recorded":""),pills:d>180&&a.lastUsed?pill("review","Unused 6+ months"):"",max,reveal:a.path});}).join("")}</ul></section>`;
+      return row({id:"app:"+a.path,title:a.name,path:a.path,bytes:a.all,disk:a.bytes+a.left.reduce((t,l)=>t+l.bytes,0),meta:[a.left.length?"with "+plural(a.left.length,"support item"):"",a.lastUsed?"opened "+age(a.lastUsed):(known?"no open recorded":"")].filter(Boolean).join(" · "),pills:d>180&&a.lastUsed?pill("review","Unused 6+ months"):"",max,reveal:a.path});}).join("")}</ul></section>`;
 }
 
 function vScanning(){

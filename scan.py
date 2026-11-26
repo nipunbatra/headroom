@@ -1018,9 +1018,89 @@ def find_dupes(big, strip_root):
     return groups[:60]
 
 
+# Where an app keeps its own files in ~/Library. Matched by the app's bundle id or its
+# exact name, never by a pattern, so one app's uninstall cannot reach another app's data.
+LEFTOVER_SPOTS = ["~/Library/Application Support/{id}", "~/Library/Application Support/{name}",
+                  "~/Library/Caches/{id}", "~/Library/Caches/{name}", "~/Library/Preferences/{id}.plist",
+                  "~/Library/Saved Application State/{id}.savedState", "~/Library/HTTPStorages/{id}",
+                  "~/Library/HTTPStorages/{id}.binarycookies", "~/Library/WebKit/{id}",
+                  "~/Library/Containers/{id}", "~/Library/Application Scripts/{id}",
+                  "~/Library/Logs/{name}", "~/Library/Cookies/{id}.binarycookies"]
+VENDOR_FOLDERS = {"Google", "Microsoft", "Adobe", "Apple", "JetBrains", "Mozilla"}   # shared by several apps
+APP_DIRS = ("/Applications", "/Applications/Utilities", "~/Applications")
+
+
+def app_identity(app):
+    """(bundle id, name) from an app's Info.plist. Either is None when missing or oddly formed."""
+    plist = os.path.join(app, "Contents", "Info.plist")
+    try:
+        if os.path.islink(plist) or os.path.islink(os.path.join(app, "Contents")):
+            return None, None                   # an identity borrowed through a link is not trusted
+        with open(plist, "rb") as f:
+            info = plistlib.load(f)
+    except Exception:  # noqa: BLE001 - unreadable or damaged plist: no leftovers are offered
+        return None, None
+    if not isinstance(info, dict):
+        return None, None
+
+    def plain(s):
+        return s if isinstance(s, str) and ".." not in s and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._\-]{2,120}", s) else None
+    bid = plain(info.get("CFBundleIdentifier"))
+    if bid and bid.count(".") < 2:              # needs the full reverse-DNS form, such as com.vendor.app
+        bid = None
+    return bid, plain(info.get("CFBundleName") or os.path.basename(app)[:-4])
+
+
+def shared_app_names():
+    """Lower-cased names and bundle ids that more than one installed app uses. A folder
+    carrying one of them cannot be pinned on a single app, so it is never offered as a leftover."""
+    seen, twice = set(), {v.lower() for v in VENDOR_FOLDERS}
+    for base in APP_DIRS:
+        try:
+            names = os.listdir(expand(base))
+        except OSError:
+            continue
+        for n in names:
+            if n.endswith(".app"):
+                for key in app_identity(os.path.join(expand(base), n)):
+                    if key is None:
+                        continue
+                    key = key.lower()
+                    if key in seen:
+                        twice.add(key)
+                    seen.add(key)
+    return twice
+
+
+def app_leftovers(app, shared=()):
+    """Support files this app left in ~/Library: existing paths that pass user_path_ok(),
+    reached without any symlink, matched by the app's own bundle id or exact name."""
+    bid, name = app_identity(app)
+    out = []
+    for spot in LEFTOVER_SPOTS:
+        key = bid if "{id}" in spot else name
+        if not key or key.lower() in shared:
+            continue
+        p = expand(spot.format(id=key, name=key))
+        parent = os.path.dirname(p)
+        if p not in out and os.path.lexists(p) and user_path_ok(p) and os.path.realpath(parent) == parent:
+            out.append(p)
+    return out
+
+
+def app_running(app):
+    """True when a process runs from inside the app bundle. Raises OSError if that cannot be checked."""
+    r = subprocess.run(["/bin/ps", "-axo", "comm="], capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        raise OSError("ps failed")
+    return any(line.strip().startswith(app + "/") for line in r.stdout.splitlines())
+
+
 def app_list(sizes, frees=None):
     apps = []
-    for base in ("/Applications", "/Applications/Utilities", expand("~/Applications")):
+    shared = shared_app_names()
+    for base in APP_DIRS:
+        base = expand(base)
         try:
             names = os.listdir(base)
         except OSError:
@@ -1028,8 +1108,24 @@ def app_list(sizes, frees=None):
         for n in names:
             if n.endswith(".app"):
                 p = os.path.join(base, n)
-                apps.append(with_frees({"name": n[:-4], "path": disp(p), "bytes": sizes.get(p, 0), "_p": p},
-                                       frees(p) if frees else None))
+                a = with_frees({"name": n[:-4], "path": disp(p), "bytes": sizes.get(p, 0), "_p": p},
+                               frees(p) if frees else None)
+                bid = app_identity(p)[0]
+                if bid:
+                    a["bundleId"] = bid
+                left = []
+                for lp in app_leftovers(p, shared):
+                    if os.path.isdir(lp) and not os.path.islink(lp):
+                        left.append(with_frees({"path": disp(lp), "bytes": sizes.get(lp, 0)},
+                                               frees(lp) if frees else None))
+                    else:
+                        try:
+                            left.append({"path": disp(lp), "bytes": os.lstat(lp).st_blocks * 512})
+                        except OSError:
+                            pass
+                if left:
+                    a["leftovers"] = sorted(left, key=lambda x: -x["bytes"])
+                apps.append(a)
 
     def last_used(a):
         try:
@@ -1101,6 +1197,65 @@ def mark_home(tree):
     node["h"] = 1
 
 
+CHANGE_MIN = 250 * MB       # smallest change in a folder's size worth reporting
+
+
+def diff_trees(old, new, root="/"):
+    """What grew and what shrank between two scans, as the deepest folders that explain the change.
+    Sizes are what deleting would return, so a new clone of something already on disk is not growth.
+    A scan only keeps folders above the map's size cutoff, so one that crosses it shows as new or gone."""
+    out = []
+
+    def kids(n):
+        return {c["n"]: c for c in n.get("c", [])}
+
+    def size(n):                        # what the folder costs: clone-shared space counted once
+        return n.get("r", n["s"]) if n else 0
+
+    def delta(o, n):
+        return size(n) - size(o)
+
+    def walk(o, n, path):
+        d = delta(o, n)
+        if o is None or n is None:                      # appeared or vanished: report it whole
+            if abs(d) >= 2 * CHANGE_MIN:
+                out.append({"path": path, "bytes": size(n), "delta": d, "gone" if n is None else "new": True})
+            return
+        ok, nk = kids(o), kids(n)
+        big = [(name, ok.get(name), nk.get(name)) for name in sorted(set(ok) | set(nk))
+               if abs(delta(ok.get(name), nk.get(name))) >= CHANGE_MIN]
+        if big and sum(abs(delta(a, b)) for _, a, b in big) >= 0.6 * abs(d):
+            for name, a, b in big:
+                walk(a, b, "~" if (a or b).get("h") else ("" if path == "/" else path) + "/" + name)
+        elif abs(d) >= CHANGE_MIN:
+            out.append({"path": path, "bytes": size(n), "delta": d})
+    walk(old, new, root or "/")
+    out.sort(key=lambda c: -abs(c["delta"]))
+    return out[:80]
+
+
+def add_history(scan_path, sample, min_gap=0):
+    """Append one free-space reading to history.json next to the scan. Numbers only, no paths."""
+    path = os.path.join(os.path.dirname(os.path.abspath(scan_path)), "history.json")
+    try:
+        with open(path) as f:
+            hist = json.load(f)
+        hist = [h for h in hist if isinstance(h, dict) and isinstance(h.get("t"), (int, float))] if isinstance(hist, list) else []
+    except (OSError, ValueError):
+        hist = []
+    if sample is None or (min_gap and hist and sample["t"] - hist[-1].get("t", 0) < min_gap):
+        return hist
+    hist = (hist + [sample])[-1500:]
+    try:                                    # never write through a link someone left at the temp name
+        fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(hist, f, separators=(",", ":"))
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+    return hist
+
+
 def run_scan(args):
     root = os.path.abspath(expand(args.root)) if args.root else (DATA if os.path.isdir(DATA) else "/")
     t0 = time.time()
@@ -1162,6 +1317,24 @@ def run_scan(args):
         "denied": sorted((disp(p) for p in r["denied"]), key=lambda p: (not p.startswith("~"), p))[:200],
         "deniedCount": len(r["denied"]),
     }
+    try:                                    # compare with the scan this one replaces
+        with open(args.out) as f:
+            prev = json.load(f)
+    except (OSError, ValueError):
+        prev = None
+    whole = root == DATA or root == "/"
+    if isinstance(prev, dict) and prev.get("root") == out["root"] and isinstance(prev.get("tree"), dict) and prev.get("scannedAt"):
+        try:
+            out["changes"] = {"since": prev["scannedAt"], "freeThen": (prev.get("disk") or {}).get("free"),
+                              "items": diff_trees(prev["tree"], out["tree"], out["root"])}
+        except (KeyError, TypeError, AttributeError):   # an older or damaged scan: nothing to compare with
+            pass
+        was = prev.get("disk") if isinstance(prev.get("disk"), dict) else {}
+        if whole and not add_history(args.out, None) and isinstance(was.get("free"), int):
+            add_history(args.out, {"t": prev["scannedAt"], "free": was["free"],
+                                   "total": was.get("total", disk["total"]), "scan": 1})
+    if whole:
+        add_history(args.out, {"t": out["scannedAt"], "free": disk["free"], "total": disk["total"], "scan": 1})
     out["seconds"] = round(time.time() - t0, 1)
     tmp = args.out + ".tmp"
     with open(tmp, "w") as f:
@@ -1283,6 +1456,24 @@ def resolve(item_id, hard, scan_path):
             raise Refused("already gone: " + disp(p))
         permanent = hard or os.path.basename(p) in REBUILDABLE or inside_cache_rule(p)
         return [("delete" if permanent else "trash", p)]
+    if item_id.startswith("app:"):                     # an app plus the support files it left in ~/Library
+        p = expand(item_id[4:])
+        if not p.endswith(".app") or not user_path_ok(p) or os.path.dirname(p) not in ("/Applications", expand("~/Applications")):
+            raise Refused("not an app Headroom can remove: " + disp(p))
+        if os.path.islink(p) or not os.path.isdir(p):
+            raise Refused("already gone: " + disp(p))
+        if not os.path.isfile(os.path.join(p, "Contents", "Info.plist")):
+            raise Refused("not an app bundle: " + disp(p))
+        if os.path.realpath(p) == os.path.realpath(os.path.dirname(os.path.dirname(HERE))):
+            raise Refused("Headroom cannot remove itself. Drag it to the Trash in Finder.")
+        try:
+            running = app_running(p)
+        except (OSError, subprocess.SubprocessError):
+            raise Refused("could not check whether " + os.path.basename(p)[:-4] + " is running")
+        if running:
+            raise Refused("quit " + os.path.basename(p)[:-4] + " first, then try again")
+        kind = "delete" if hard else "trash"
+        return [(kind, p)] + [(kind, left) for left in app_leftovers(p, shared_app_names())]
     if item_id.startswith("hfrepo:") or item_id.startswith("hforphans:"):
         tag, _, shown = item_id.partition(":")
         p = expand(shown)
@@ -1530,6 +1721,11 @@ def make_handler(token, port, scan_path):
             elif path == "/api/status":
                 if self.guard():
                     self.send(200, self.status())
+            elif path == "/api/history":            # free space over time; adds a reading at most every 3 hours
+                if self.guard():
+                    s = self.status()
+                    self.send(200, {"samples": add_history(scan_path, {"t": int(time.time()), "free": s["free"],
+                                                                       "total": s["total"]}, 3 * 3600)})
             elif path in ("/", "/index.html"):
                 if self.guard(False):
                     with open(os.path.join(HERE, "index.html"), "rb") as f:
@@ -1638,7 +1834,9 @@ def run_app(args):
             elif not SCAN["running"] and not STATE["busy"] and time.time() - STATE["last"] > IDLE_EXIT:
                 os._exit(0)
     threading.Thread(target=watchdog, daemon=True).start()
-    print(f"HEADROOM_URL {url}", flush=True)   # the native wrapper reads this line
+    if args.stay:                              # the native app is the client: hand it the token over the pipe
+        print(f"HEADROOM_TOKEN {token}", flush=True)
+    print(f"HEADROOM_URL {url}", flush=True)   # the native app reads this line
     if not args.no_open:
         open_window(url)
     try:
