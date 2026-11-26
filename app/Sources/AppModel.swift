@@ -5,7 +5,7 @@ import SwiftUI
 import UserNotifications
 
 enum Page: String, CaseIterable, Identifiable {
-    case overview, cleanup, changes, map, files, projects, downloads, apps
+    case overview, cleanup, changes, map, files, projects, downloads, apps, locations, activity
 
     var id: String { rawValue }
 
@@ -18,6 +18,8 @@ enum Page: String, CaseIterable, Identifiable {
         case .files: return "Large Files"
         case .projects: return "Projects"
         case .downloads: return "Downloads"
+        case .locations: return "Folders & Drives"
+        case .activity: return "Cleanup History"
         case .apps: return "Applications"
         }
     }
@@ -31,12 +33,14 @@ enum Page: String, CaseIterable, Identifiable {
         case .files: return "doc"
         case .projects: return "hammer"
         case .downloads: return "arrow.down.circle"
+        case .locations: return "externaldrive"
+        case .activity: return "clock.arrow.circlepath"
         case .apps: return "square.grid.2x2"
         }
     }
 
-    static let main: [Page] = [.overview, .cleanup, .changes]
-    static let explore: [Page] = [.map, .files, .projects, .downloads, .apps]
+    static let main: [Page] = [.overview, .cleanup, .changes, .activity]
+    static let explore: [Page] = [.locations, .map, .files, .projects, .downloads, .apps]
 }
 
 /// Something the helper can clean, addressed by id. The helper decides what the id means.
@@ -115,13 +119,29 @@ struct TagInfo {
     static let shared = AppModel()
 
     let engine: Engine
+    let explorer: LocationExplorer
+    var protectedPaths: [String] = []
+    private var policyUnreadable = false
+    var protectionError: String?
+    func changeProtection(_ path: String, add: Bool) {
+        guard session?.stage != .running else { return }
+        do {
+            protectedPaths = try ProtectedPaths(env: engine.env).change(path, add: add)
+            protectionError = nil
+            policyUnreadable = false
+            refreshDry()
+        } catch { protectionError = error.localizedDescription; policyUnreadable = (try? ProtectedPaths(env: engine.env).read()) == nil }
+    }
+
     private let defaults: UserDefaults
-    private var skippedPathsByRule: [String: [String]]
+    private var skippedPathsByRule: [String: [String]] = [:]
     var skippedRules: Set<String> { Set(skippedPathsByRule.keys) }
 
     init(engine: Engine = Engine(), defaults: UserDefaults = .standard) {
         self.engine = engine
+        explorer = LocationExplorer(engine: engine, defaults: defaults)
         self.defaults = defaults
+        do { protectedPaths = try ProtectedPaths(env: engine.env).read() } catch { protectionError = error.localizedDescription; policyUnreadable = true }
         skippedPathsByRule = defaults.dictionary(forKey: "quickCleanupSkippedRules") as? [String: [String]] ?? [:]
     }
     var phase = Phase.starting
@@ -378,7 +398,12 @@ struct TagInfo {
                 (paths + skippedPaths).contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
             }
         }
-        return (included + projects).sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.id < $1.id }
+        return (included + projects).filter { item in
+            if policyUnreadable { return false }
+            if protectedPaths.isEmpty { return true }
+            if item.cmd != nil { return false }
+            return !item.paths.contains { shown in protectedPaths.contains { ProtectedPaths.overlaps(engine.env.expand(shown), $0) } }
+        }.sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.id < $1.id }
     }
 
     /// The sum of several items, counting a folder inside another one once.
@@ -539,7 +564,7 @@ struct TagInfo {
             s.current = i
             s.marks[it.id] = .working
             guard let reviewed = s.previews[it.id] else { continue }
-            let r = await engine.clean(it, hard: s.hard, scan: scan, reviewed: reviewed)
+            let r = await engine.clean(it, hard: s.hard, scan: scan, reviewed: reviewed, sessionID: s.id.uuidString)
             if let f = r.free { free = f }
             s.trashed += r.trashed
             if r.ok {

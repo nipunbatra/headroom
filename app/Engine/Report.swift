@@ -648,8 +648,8 @@ enum Report {
     /// Scans, builds every report, compares with the scan it replaces, and writes scan.json.
     /// Returns nil if cancelled; throws if the result cannot be written.
     static func run(_ opts: ScanOptions, env: Env, progress: ScanProgress, write: Bool = true) throws -> Scan? {
-        if write, [env.historyPath, env.logPath].contains(where: { $0.caseInsensitiveCompare(env.scanPath) == .orderedSame }) {
-            throw EngineError("Choose a scan output filename different from the history and action log.")
+        if write, [env.historyPath, env.logPath, env.protectionPath, env.protectionLockPath].contains(where: { $0.caseInsensitiveCompare(env.scanPath) == .orderedSame }) {
+            throw EngineError("Choose a scan output filename different from the history, action log, and protection files.")
         }
         guard let rootStat = lstatOf(opts.root), rootStat.isDir, rootStat.st_flags & SF_DATALESS_FLAG == 0 else {
             throw EngineError("The scan root must be an available local directory.")

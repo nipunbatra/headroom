@@ -208,6 +208,7 @@ struct CleanResult {
     var preview: [ReviewedStep]?
     var freed: Int64 = 0
     var trashed = 0
+    var completed = 0
     var summary = ""
     var free: Int64?
     var output: String?

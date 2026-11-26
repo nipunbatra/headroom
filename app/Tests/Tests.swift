@@ -32,6 +32,7 @@ enum TestMain {
         changes()
         auditRegressionTests()
         await workflowTests()
+        await locationAndProtectionTests()
         if T.count == 0 { T.fail("No tests matched") }
         print("\n\(T.count) tests, \(T.passed) checks passed, \(T.failed.count) failed")
         for f in T.failed { print("  " + f) }
@@ -300,7 +301,7 @@ func cleaning() {
         let again = c.clean("file:~/Documents/a.bin", hard: false, dry: false, scan: nil)
         T.expect(!again.ok && again.errors.first?.contains("already gone") == true)
         let log = (try? String(contentsOfFile: f.env.logPath, encoding: .utf8)) ?? ""
-        T.equal(log.split(separator: "\n").count, 2, "one log line per action carried out")
+        T.equal(log.split(separator: "\n").count, 3, "both completed actions and the refused retry are recorded")
         T.expect(log.contains("\"id\":\"file:~\\/Documents\\/a.bin\"") || log.contains("file:~/Documents/a.bin"))
     }
 

@@ -4,7 +4,30 @@
 
 The highest-risk findings were in the transition from discovery to deletion. A filtered list could stage hidden items. The default safe set could empty the Trash. The confirmation button could run before its preview arrived. All three paths now have app-model or engine regression coverage. The revised overview gives a first-time user four specific places to look and opens the corresponding filtered list with one click.
 
-## Findings and changes
+## 0.5.0 workflow audit
+
+The highest-priority gaps in 0.4.0 were choosing a location, protecting a project, finding the outcome of a cleanup, and fitting the initial decision into a laptop window. This release implements all four.
+
+| Workflow | Comparison evidence | What ships in Headroom |
+| --- | --- | --- |
+| Find the largest folders on an external disk | Mole 1.59.1 analyzed a disposable media folder locally. Its JSON listed Footage, Audio, and Notes.txt in descending order, three files and 12,000,006 apparent bytes. MacPaw documents selecting a drive or folder in Space Lens. ArtCraft’s clean-room CLI opened the public workflow guide. CleanMyMac behavior here is vendor-documented. [Mole analyzer](https://github.com/tw93/Mole#analyze) · [MacPaw Space Lens](https://macpaw.com/support/cleanmymac/knowledgebase/space-lens) · [ArtCraft](https://github.com/storytold/craft-anything) | ⌘O opens a folder or drive. Results show allocated bytes, individual folders and the top 100 local files of at least 1 MB outside packages. Measurements stay on the chosen filesystem. Reopening a folder compares its size using its volume UUID and directory inode. A partial scan does not replace the baseline. |
+| Keep a working project safe | MacPaw documents persistent per-tool exclusions. Mole documents a whitelist for cleanup. [CleanMyMac ignore lists](https://macpaw.com/support/cleanmymac/knowledgebase/ignore-lists) · [Mole](https://github.com/tw93/Mole) | Settings → Protection applies across preview, confirmation and individual operations. Protecting a child also blocks removal of its parent. Hard-to-constrain external commands are withheld while any location is protected. A file lock prevents another instance from changing policy during an operation. |
+| See what happened after cleanup | Mole exposes a recent history command. The prior Headroom release had a raw local log. [Mole history](https://github.com/tw93/Mole) | Cleanup History shows the latest 200 records within the last MiB, groups new actions by session, reads legacy entries, and reports completed steps and errors for unfinished actions. There is no space-reclaimed claim for files moved to Trash. |
+| Decide where to start without scrolling | The prior native Overview stacked the disk meter, review shortcuts, largest items, folder and file groups, trend and scan notes. The website separated the download link from installation details. | The native page shows the disk, Quick Cleanup and one selected detail section. The What Changed page owns the growth list and free-space chart. The download page puts installation and signing status beside clickable previews. Long file lists still scroll. |
+
+### Remaining product gaps
+
+| Priority | Gap | What would make it ready |
+| --- | --- | --- |
+| High | Orphaned app support and recovery after a partial uninstall | Inventory leftovers after the app has gone, distinguish shared vendor data, and make ownership and previous outcomes visible before staging a retry. |
+| High | Cleanup from arbitrary locations | The new explorer is read-only. Moving files from removable disks needs a volume-specific review and Trash destination, plus identity rechecks after disconnection. |
+| Medium | Finding duplicate photos and smaller files | Existing duplicate detection favors large files. A photo workflow needs a visual comparison, configurable matching and a clear retained original. |
+| Medium | Cloud and browser storage | Cloud placeholders are skipped. Provider-specific local eviction, browser profiles, and signed-in state require separate review flows. |
+| Adjacent | App updates, login items, malware detection and system monitoring | Each needs its own trust, update or monitoring model. The shipped feature set focuses on local disk space. [CleanMyMac tools](https://macpaw.com/support/cleanmymac/knowledgebase/my-tools) · [Mole status](https://github.com/tw93/Mole#status) |
+
+Regression fixtures exercise small files, empty folders, package contents, hard links with visible and opaque names, scan cancellation, stale requests, per-folder baselines, protection after preview, concurrent policy edits, malformed policies, refusal logging and stable history offsets. The complete suite passes 87 tests and 497 checks plus the 37-file independent Python cross-check. Native window and distribution measurements are recorded with the [release](https://github.com/nipunbatra/headroom/releases/tag/v0.5.0).
+
+## Earlier audit findings and changes
 
 | Priority | What the audit found | Change and evidence |
 | --- | --- | --- |

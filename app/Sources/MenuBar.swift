@@ -144,6 +144,34 @@ import SwiftUI
             .tabItem { Label("Quick Cleanup", systemImage: "checklist") }
 
             Form {
+                Section("Protected files and folders") {
+                    Button("Add Location…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = true
+                        panel.canChooseDirectories = true
+                        panel.allowsMultipleSelection = true
+                        if panel.runModal() == .OK {
+                            for url in panel.urls { model.changeProtection(url.path, add: true) }
+                        }
+                    }
+                    if model.protectedPaths.isEmpty { Text("No protected locations.").foregroundStyle(.secondary) }
+                    ForEach(model.protectedPaths, id: \.self) { path in
+                        HStack {
+                            Text(model.engine.env.disp(path)).lineLimit(1).truncationMode(.middle).help(path)
+                            Spacer()
+                            Button("Remove") { model.changeProtection(path, add: false) }
+                        }
+                    }
+                    Text("Protect a location and its contents from cleanup. External cleanup commands pause while protection is active because their tools choose the files.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    if let error = model.protectionError { Text(error).foregroundStyle(.red) }
+                }
+            }
+            .disabled(model.session?.stage == .running)
+            .formStyle(.grouped)
+            .tabItem { Label("Protection", systemImage: "lock.shield") }
+
+            Form {
                 Section("Access") {
                     LabeledContent("Full Disk Access") {
                         Label(model.fullDiskAccess ? "On" : "Off", systemImage: model.fullDiskAccess ? "checkmark.circle.fill" : "minus.circle")

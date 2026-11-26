@@ -24,7 +24,7 @@ jobs:
         run: |
           mkdir -p _site/images
           cp docs/index.html docs/site.css _site/
-          cp images/headroom-{icon,overview,large-files,uninstall}.png _site/images/
+          cp images/headroom-{icon,overview,locations,large-files,uninstall}.png _site/images/
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site

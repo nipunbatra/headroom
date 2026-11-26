@@ -38,6 +38,10 @@ enum Reader {
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         if fd < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(fd) }
+        if let rootDev {
+            var st = stat()
+            guard fstat(fd, &st) == 0, st.st_dev == rootDev else { throw POSIXError(.EXDEV) }
+        }
         let own = buffer == nil
         let buf = buffer ?? UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 8)
         defer { if own { buf.deallocate() } }
@@ -70,6 +74,7 @@ enum Reader {
                     e.id = p.loadUnaligned(fromByteOffset: 56, as: UInt64.self)
                     if type == 1 {
                         if fileAttrs != 0 {
+                            if p.loadUnaligned(fromByteOffset: 52, as: UInt32.self) & SF_DATALESS_FLAG != 0 { e.skip = .dataless }
                             e.links = p.loadUnaligned(fromByteOffset: 64, as: UInt32.self)
                             e.bytes = p.loadUnaligned(fromByteOffset: 68, as: Int64.self)
                             e.length = p.loadUnaligned(fromByteOffset: 76, as: Int64.self)
@@ -98,6 +103,7 @@ enum Reader {
                 var e = DirEntry(name: name, isDir: false)
                 e.mtime = Int64(st.st_mtimespec.tv_sec)
                 e.id = UInt64(st.st_ino)
+                if st.st_flags & SF_DATALESS_FLAG != 0 { e.skip = .dataless }
                 e.links = UInt32(st.st_nlink)
                 e.bytes = st.allocated
                 e.length = Int64(st.st_size)

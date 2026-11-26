@@ -75,6 +75,8 @@ final class Env: @unchecked Sendable {
         })
     }
 
+    var protectionPath: String { support + "/protected-paths.json" }
+    var protectionLockPath: String { support + "/.protection-lock" }
     var historyPath: String { support + "/history.json" }
     var logPath: String { support + "/headroom-actions.log" }
 

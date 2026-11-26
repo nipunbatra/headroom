@@ -3,6 +3,8 @@ scan.json
 scan.json.tmp
 scan.backup.json
 headroom-actions.log
+protected-paths.json
+.protection-lock
 history.json
 history.json.tmp
 

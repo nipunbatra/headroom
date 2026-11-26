@@ -30,7 +30,7 @@ func auditRegressionTests() {
 
     T.test("scan output preserves reserved history and log files") {
         let f = Fixture()
-        for name in ["history.json", "History.JSON", "headroom-actions.log"] {
+        for name in ["history.json", "History.JSON", "headroom-actions.log", "protected-paths.json", ".PROTECTION-LOCK"] {
             let path = f.root + "/" + name
             try Data("previous data".utf8).write(to: URL(fileURLWithPath: path))
             let env = Env(home: f.home, support: f.root, scanFile: path)

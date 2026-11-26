@@ -60,7 +60,7 @@ import SwiftUI
                     }
                 }
             }
-            .frame(height: 44)
+            .frame(height: 30)
             GeometryReader { geo in
                 HStack(spacing: 0) {
                     Spacer()
@@ -225,35 +225,38 @@ struct FlowLayout: Layout {
 @MainActor struct OverviewView: View {
     @Environment(AppModel.self) private var model
     @State private var hoverSegment: String?
-    @State private var hoverSample: Sample?
-    @State private var width: CGFloat = 1000
+    private enum Panel: String, CaseIterable {
+        case review = "Review", items = "Cleanup items", places = "Folders", kinds = "File types", notes = "Scan notes"
+    }
+    @State private var panel = Panel.review
 
     var body: some View {
         if !model.search.isEmpty {
             RowList(sections: searchSections)
         } else if let scan = model.scan {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Space.l) {
-                    hero(scan)
-                    if width >= 860 {
-                        HStack(alignment: .top, spacing: Space.l) {
-                            VStack(spacing: Space.l) { reviewCard(scan); winsCard; notesCard(scan) }
-                            VStack(spacing: Space.l) { placesCard(scan); changesCard(scan); trendCard; kindsCard(scan) }.frame(width: 310)
-                        }
-                    } else {
-                        VStack(spacing: Space.l) { reviewCard(scan); winsCard; placesCard(scan); changesCard(scan); trendCard; kindsCard(scan); notesCard(scan) }
-                    }
-                }
-                .padding(Space.l)
-                .frame(maxWidth: 1240, alignment: .leading)
-                .frame(maxWidth: .infinity)
-            }
-            .background(GeometryReader { geo in
-                Color.clear
-                    .onAppear { width = geo.size.width }
-                    .onChange(of: geo.size.width) { _, new in width = new }
-            })
+            ViewThatFits(in: .vertical) {
+                dashboard(scan).fixedSize(horizontal: false, vertical: true)
+                ScrollView { dashboard(scan) }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+    }
+
+    private func dashboard(_ scan: Scan) -> some View {
+        VStack(alignment: .leading, spacing: Space.m) {
+            hero(scan)
+            Picker("Overview section", selection: $panel) {
+                ForEach(Panel.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented).labelsHidden()
+            switch panel {
+            case .review: reviewCard(scan)
+            case .items: winsCard
+            case .places: placesCard(scan)
+            case .kinds: kindsCard(scan)
+            case .notes: notesCard(scan)
+            }
+        }
+        .padding(Space.m)
+        .frame(maxWidth: 1000, alignment: .leading)
     }
 
     /// Typing in the search field from here looks through every page at once.
@@ -356,7 +359,7 @@ struct FlowLayout: Layout {
         Button { model.go(page, focus: focus) } label: {
             HStack(spacing: 12) {
                 Image(systemName: symbol).font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.tint).frame(width: 32, height: 32)
+                    .foregroundStyle(.tint).frame(width: 27, height: 27)
                     .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title).fontWeight(.medium)
@@ -366,7 +369,7 @@ struct FlowLayout: Layout {
                 Text(fmt(bytes)).monospacedDigit().foregroundStyle(.secondary)
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             }
-            .padding(.vertical, 7).contentShape(Rectangle())
+            .padding(.vertical, 4).contentShape(Rectangle())
         }
         .buttonStyle(.plain).help("Review " + title.lowercased())
     }
@@ -382,50 +385,6 @@ struct FlowLayout: Layout {
                     if flat.id != wins.last?.id { Divider().padding(.leading, 46) }
                 }
                 if wins.isEmpty { Text("Nothing worth clearing was found.").foregroundStyle(.secondary) }
-            }
-        }
-    }
-
-    @ViewBuilder private func changesCard(_ scan: Scan) -> some View {
-        if let ch = scan.changes {
-            let delta = model.free - (ch.freeThen ?? model.free)
-            let since = Date(timeIntervalSince1970: ch.since).formatted(.relative(presentation: .named))
-            let grew = ch.items.filter { $0.delta > 0 }.prefix(4)
-            Card("Since the Last Scan", subtitle: "Compared with \(since).",
-                 trailing: AnyView(Button("See All") { model.go(.changes) }.controlSize(.small))) {
-                HStack(spacing: 6) {
-                    Image(systemName: delta < 0 ? "arrow.down.right" : "arrow.up.right")
-                        .foregroundStyle(delta < 0 ? Palette.review.color : Palette.safe.color)
-                    Text(abs(delta) < 100 * MB ? "Free space is about the same." : "Free space \(delta < 0 ? "fell" : "rose") by \(fmt(abs(delta))).")
-                }
-                if grew.isEmpty {
-                    Text("No folder grew by more than 250 MB.").foregroundStyle(.secondary)
-                } else {
-                    VStack(spacing: 6) {
-                        ForEach(Array(grew), id: \.path) { c in
-                            HStack {
-                                Text(c.path).lineLimit(1).truncationMode(.middle).help(c.path)
-                                Spacer(minLength: Space.s)
-                                Text(signed(c.delta)).monospacedDigit().foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            Card("Since the Last Scan") {
-                Text("After the next scan, this shows which folders grew and which shrank.").foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    @ViewBuilder private var trendCard: some View {
-        if model.history.count >= 2 {
-            let shown = hoverSample ?? model.history.last
-            Card("Free Space Over Time",
-                 subtitle: shown.map { "\($0.date.formatted(date: .abbreviated, time: .shortened)): \(fmt($0.free)) free" }) {
-                FreeSpaceChart(samples: model.history, hover: $hoverSample)
             }
         }
     }

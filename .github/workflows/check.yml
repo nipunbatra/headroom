@@ -19,3 +19,28 @@ jobs:
           app="$RUNNER_TEMP/release/Headroom.app"
           codesign --verify --deep --strict "$app"
           lipo "$app/Contents/MacOS/Headroom" -verify_arch arm64 x86_64
+      - name: Verify drag-to-Applications image
+        run: |
+          mount="$RUNNER_TEMP/headroom-image"
+          mkdir "$mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" dist/Headroom.dmg
+          trap 'hdiutil detach "$mount"' EXIT
+          test "$(readlink "$mount/Applications")" = /Applications
+          codesign --verify --deep --strict "$mount/Headroom.app"
+          lipo "$mount/Headroom.app/Contents/MacOS/Headroom" -verify_arch arm64 x86_64
+  website:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check the download page at laptop and phone sizes
+        run: |
+          site="$RUNNER_TEMP/headroom-site"
+          mkdir -p "$site/images"
+          cp docs/index.html docs/site.css "$site/"
+          cp images/headroom-*.png "$site/images/"
+          python3 -m http.server 48732 --bind 127.0.0.1 --directory "$site" > "$RUNNER_TEMP/site.log" 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          curl --retry 5 --retry-connrefused -fsS http://127.0.0.1:48732/index.html > /dev/null
+          npm install --prefix "$RUNNER_TEMP/headroom-web-check" playwright-core@1.65.1 --no-audit --no-fund
+          NODE_PATH="$RUNNER_TEMP/headroom-web-check/node_modules" node app/Tests/site-layout.cjs http://127.0.0.1:48732

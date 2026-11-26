@@ -92,7 +92,7 @@ import SwiftUI
     var body: some View {
         @Bindable var model = model
         Group {
-            if model.scan != nil {
+            if model.page == .locations || model.page == .activity || model.scan != nil {
                 page
             } else if model.scanning {
                 ScanningView()
@@ -113,7 +113,9 @@ import SwiftUI
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 filter
-                if model.scanning {
+                if model.page == .locations || model.page == .activity {
+                    EmptyView()
+                } else if model.scanning {
                     Button("Stop Scan", systemImage: "stop.circle") { model.cancelScan() }
                         .help("Stop measuring and keep the current figures (⌘.)")
                 } else {
@@ -128,6 +130,8 @@ import SwiftUI
 
     @ViewBuilder private var page: some View {
         switch model.page {
+        case .locations: LocationView(explorer: model.explorer)
+        case .activity: ActivityView()
         case .overview: OverviewView()
         case .cleanup: RowList(sections: model.cleanupSections())
         case .changes: ChangesView()
@@ -228,9 +232,12 @@ import SwiftUI
     }
 
     private var subtitle: String {
+        if model.page == .locations { return "Read-only storage analysis" }
+        if model.page == .activity { return "Recent actions on this Mac" }
         if model.scanning { return model.progress }
         guard let scan = model.scan else { return "" }
         switch model.page {
+        case .locations, .activity: return ""
         case .overview: return model.scannedText
         case .cleanup: return "\(fmt(model.totals.safe)) safe to clear"
         case .changes:

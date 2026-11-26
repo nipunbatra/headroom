@@ -284,14 +284,17 @@ final class Cleaner: @unchecked Sendable {
 
     /// Carries out one id, or with `dry` only says what it would do.
     func clean(_ id: String, hard: Bool, dry: Bool, scan: Scan?, reviewed: [ReviewedStep]? = nil,
-               selectedSupport: Set<String> = []) -> CleanResult {
+               selectedSupport: Set<String> = [], sessionID: String? = nil, title: String? = nil) -> CleanResult {
         if !dry { lock.lock() }
         defer { if !dry { lock.unlock() } }
         var res = CleanResult(id: id)
+        defer { if !dry { log(id: id, hard: hard, res, sessionID: sessionID, title: title) } }
         let steps: [Step]
         let current: [ReviewedStep]
         do {
             steps = try resolve(id, hard: hard, scan: scan, selectedSupport: selectedSupport)
+            let protection = ProtectedPaths(env: env)
+            try protection.validate(steps, paths: protection.read())
             current = dry ? try steps.map(ReviewedStep.init) : []
         } catch let r as Refused {
             res.errors.append(r.message)
@@ -314,14 +317,19 @@ final class Cleaner: @unchecked Sendable {
         var failed = 0
         for (index, step) in steps.enumerated() {
             do {
-                let currentStep = try ReviewedStep(step)
-                if let expected = reviewed?[index], currentStep != expected { throw Refused("the target changed after review") }
-                switch step {
-                case .run(let cmd): res.output = try runCommand(cmd)
-                case .delete(let p): try Cleaner.remove(p, expected: currentStep)
-                case .trash(let p):
-                    try env.trasher(p)
-                    res.trashed += 1
+                let protection = ProtectedPaths(env: env)
+                try protection.withLock(LOCK_SH) {
+                    try protection.validate([step], paths: protection.read())
+                    let currentStep = try ReviewedStep(step)
+                    if let expected = reviewed?[index], currentStep != expected { throw Refused("the target changed after review") }
+                    switch step {
+                    case .run(let cmd): res.output = try runCommand(cmd)
+                    case .delete(let p): try Cleaner.remove(p, expected: currentStep)
+                    case .trash(let p):
+                        try env.trasher(p)
+                        res.trashed += 1
+                    }
+                    res.completed += 1
                 }
             } catch {
                 failed += 1
@@ -341,15 +349,18 @@ final class Cleaner: @unchecked Sendable {
         res.ok = failed == 0
         res.free = freeBytes()
         res.freed = max(0, (res.free ?? 0) - before)
-        log(id: id, hard: hard, res)
         return res
     }
 
-    private func log(id: String, hard: Bool, _ res: CleanResult) {
+    private func log(id: String, hard: Bool, _ res: CleanResult, sessionID: String?, title: String?) {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        let entry: [String: Any] = ["at": f.string(from: Date()), "id": id, "hard": hard, "did": res.summary, "ok": res.ok,
+        var entry: [String: Any] = ["at": f.string(from: Date()), "id": id, "hard": hard, "did": res.summary, "ok": res.ok,
                                     "freed": res.freed, "errors": res.errors]
+        entry["session"] = sessionID
+        entry["title"] = title
+        entry["trashed"] = res.trashed
+        entry["completed"] = res.completed
         guard var data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return }
         data.append(0x0A)
         let fd = open(env.logPath, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_NONBLOCK, 0o600)

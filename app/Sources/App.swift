@@ -64,6 +64,8 @@ struct HeadroomApp: App {
 
     var body: some View {
         let paths = model.highlighted.compactMap(\.reveal)
+        Button("Analyze Folder or Drive…") { model.go(.locations); model.explorer.choose() }
+            .keyboardShortcut("o")
         Button("Scan Disk") { model.rescan() }
             .keyboardShortcut("r")
             .disabled(model.scanning)
@@ -88,7 +90,7 @@ struct HeadroomApp: App {
 
     var body: some View {
         Divider()
-        ForEach(Array(Page.allCases.enumerated()), id: \.element) { i, page in
+        ForEach(Array(Page.allCases.prefix(9).enumerated()), id: \.element) { i, page in
             Button(page.title) { model.go(page) }
                 .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
         }

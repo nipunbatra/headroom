@@ -3,13 +3,17 @@
 A native macOS disk space analyzer. See what grew, inspect the files behind a large folder,
 and review the exact paths or tool commands before cleaning. The Swift scanner runs on your Mac.
 
-[Download Headroom for Mac](https://github.com/nipunbatra/headroom/releases/latest/download/Headroom.zip) ·
+[Download Headroom for Mac](https://github.com/nipunbatra/headroom/releases/latest/download/Headroom.dmg) ·
 [Website and screenshots](https://nipunbatra.github.io/headroom/) ·
 [Release notes and checksum](https://github.com/nipunbatra/headroom/releases/latest)
 
 Start in **Overview** to review installers, downloads older than a year, idle builds, or duplicate groups.
 Each shortcut opens its filtered list. **Quick Cleanup…** previews eligible caches and build folders.
-Settings → Quick Cleanup remembers which rules to include.
+Settings → Quick Cleanup remembers which rules to include. Overview fits the disk gauge and four shortcuts in one window. The section picker opens more detail.
+
+- **Folders & Drives** measures a folder or mounted volume independently of the startup scan. Open subfolders, compare repeat measurements, and reveal or preview the largest files. Use ⌘O from anywhere.
+- **Protection** in Settings keeps chosen paths out of cleanup, including when a parent folder is selected. External cleanup commands are unavailable while protection is active because they choose their own targets.
+- **Cleanup History** groups completed and unfinished operations by review session. Search for a path or filter for unfinished actions.
 
 - **Clean Up**: known places where space piles up (caches, package managers, simulators, model
   caches, session logs), each marked *Safe to Clear*, *Review First* or *Leave Alone*.
@@ -37,7 +41,8 @@ Scanning is read-only. Nothing is removed until you press Clean and confirm.
 | Keys | Action |
 |---|---|
 | ⌘R | Scan the disk (⌘. stops it) |
-| ⌘1 … ⌘8 | Switch page |
+| ⌘1 … ⌘9 | Switch page |
+| ⌘O | Choose a folder or mounted drive to measure |
 | ⇧⌘K | Review Quick Cleanup… |
 | ⌘D | Add the selected rows to the cleanup list |
 | ⌘⌫ or Delete | Clean the selected rows… |
@@ -49,12 +54,9 @@ Scanning is read-only. Nothing is removed until you press Clean and confirm.
 
 ## Install
 
-Download the universal ZIP from [GitHub Releases](https://github.com/nipunbatra/headroom/releases/latest).
-Unzip it, move **Headroom.app** into Applications, and open it on macOS 14 or later.
-The v0.4.0 download is signed with Nipun Batra’s Developer ID and distributed without Apple notarization.
-If macOS blocks first launch, check the checksum in the release notes. For a copy you trust, Apple
-documents the per-app **Open Anyway** option under System Settings → Privacy & Security.
-[Apple’s Gatekeeper guide](https://support.apple.com/en-us/102445)
+Open the [universal disk image](https://github.com/nipunbatra/headroom/releases/latest/download/Headroom.dmg), drag **Headroom.app** onto **Applications**, then launch it from Applications. Requires macOS 14 or later.
+
+Version 0.5.0 has a timestamped Developer ID signature. Apple notarization is outstanding. The [release notes](https://github.com/nipunbatra/headroom/releases/tag/v0.5.0) include SHA-256 checksums, a ZIP download, and Apple’s first-launch instructions.
 
 To build from source, install the Xcode Command Line Tools and run:
 
@@ -66,7 +68,9 @@ cd headroom
 
 Local builds use an ad-hoc signature by default. Set `HEADROOM_SIGN_IDENTITY` to a Developer ID
 Application identity to sign with hardened runtime and a secure timestamp. Running `./build.sh`
-without install leaves both the app and ZIP in `dist/`.
+leaves the app, ZIP and drag-to-Applications DMG in `dist/`. For a signed release, set
+`HEADROOM_NOTARY_PROFILE` to a stored notarytool Keychain profile and run `./notarize.sh`.
+It submits the disk image to Apple, staples the accepted tickets, regenerates the ZIP, and checks Gatekeeper.
 
 For a fuller picture, give Headroom Full Disk Access in System Settings › Privacy & Security.
 Without it the Trash, Mail, Messages and Photos internals cannot be measured.

@@ -11,7 +11,7 @@ REMOVEFILE_HEADER="$(xcrun --sdk macosx --show-sdk-path)/usr/include/removefile.
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$TEST_DIR"' EXIT
 BIN="$TEST_DIR/headroom-tests"
-swiftc -Onone -import-objc-header "$REMOVEFILE_HEADER" -parse-as-library -target "$(uname -m)-apple-macos14.0" -o "$BIN" app/Engine/*.swift app/Sources/{AppModel,Rows,Theme,Engine,MapView,RowList}.swift app/Tests/*.swift
+swiftc -Onone -import-objc-header "$REMOVEFILE_HEADER" -parse-as-library -target "$(uname -m)-apple-macos14.0" -o "$BIN" app/Engine/*.swift app/Sources/{AppModel,LocationExplorer,Rows,Theme,Engine,MapView,RowList}.swift app/Tests/*.swift
 if [[ "${1:-}" != "" && "${1:-}" != "--no-python" ]]; then
   "$BIN" "$1"
   exit $?

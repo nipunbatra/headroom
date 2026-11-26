@@ -36,8 +36,8 @@ No Python, no helper process, no network.
 - `test.sh`: builds and runs the tests, then (if `python3` exists) builds one fixture, scans it
   with both the Swift engine and `scan.py`, and requires the two reports to agree.
   Run it after any engine change. `./test.sh <words>` runs matching tests only.
-- `build.sh`: compiles a universal binary with plain `swiftc`, makes the icon, ad-hoc signs, and
-  zips to `dist/Headroom.zip`. `--debug` is a quick local build; `--install` moves the app into
+- `build.sh`: compiles a universal binary with plain `swiftc`, makes the icon, signs the app, creates a drag-to-Applications DMG, and
+  zips to `dist/Headroom.zip`. `--debug` is a quick local build; `--install` copies the app into
   `/Applications` (quitting a running copy first). Rebuild after any edit.
 - `Headroom --scan [--root <folder>]` scans from a terminal. `HEADROOM_OUT=<file>` moves
   `scan.json`, `history.json` and the action log into that file's folder (use it for experiments).
@@ -121,7 +121,7 @@ No Python, no helper process, no network.
 
 - Without Full Disk Access, `~/.Trash`, Mail, Messages and Photos internals are unreadable.
 - Local builds are ad-hoc signed by default. Set `HEADROOM_SIGN_IDENTITY` for Developer ID distribution.
-  The v0.4.0 GitHub download is Developer ID signed and lacks a notarization ticket.
+  The v0.5.0 DMG and ZIP contain the same Developer ID signed app. Run `./notarize.sh` with the release Keychain profile to submit a signed build to Apple.
 - Spotlight has no index on this disk, so app last-opened dates are missing.
 - Hard links are counted in whichever folder a worker reaches first, so which folder "owns" a
   hard-linked file can differ between scans; totals do not.

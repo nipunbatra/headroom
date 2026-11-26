@@ -23,6 +23,16 @@ final class Engine: @unchecked Sendable {
         await background { Report.loadScan(self.env.scanPath) }
     }
 
+    func analyzeLocation(_ path: String, progress: ScanProgress) async throws -> LocationReport? {
+        let result: Result<LocationReport?, Error> = await background { Result { try LocationReport.measure(path, progress: progress) } }
+        return try result.get()
+    }
+
+    func recentActivity() async throws -> [CleanupRecord] {
+        let result: Result<[CleanupRecord], Error> = await background { Result { try CleanupRecord.recent(self.env.logPath) } }
+        return try result.get()
+    }
+
     /// The whole disk, read-only. Nil if cancelled.
     func scan(progress: ScanProgress) async throws -> Scan? {
         let result: Result<Scan?, Error> = await background {
@@ -103,9 +113,9 @@ final class Engine: @unchecked Sendable {
         return conflicts
     }
 
-    func clean(_ item: Candidate, hard: Bool, scan: Scan?, reviewed: [ReviewedStep]) async -> CleanResult {
+    func clean(_ item: Candidate, hard: Bool, scan: Scan?, reviewed: [ReviewedStep], sessionID: String? = nil) async -> CleanResult {
         await background {
-            self.cleaner.clean(item.id, hard: hard, dry: false, scan: scan, reviewed: reviewed, selectedSupport: item.selectedSupport)
+            self.cleaner.clean(item.id, hard: hard, dry: false, scan: scan, reviewed: reviewed, selectedSupport: item.selectedSupport, sessionID: sessionID, title: item.title)
         }
     }
 
